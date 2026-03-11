@@ -12,6 +12,7 @@ Tools exposed:
   Memory   : store_memory, recall_memory, record_decision, query_decisions
   Playbooks: get_playbook, validate_checklist
   Metrics  : get_metrics
+  Agents   : register_agent, get_agent_profile, list_agents
 """
 
 import sys
@@ -22,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from fastmcp import FastMCP
 
+from tools.agents import get_agent_profile, list_agents, register_agent
 from tools.artifacts import publish_artifact, read_artifact
 from tools.ask_gpt import ask_gpt
 from tools.locks import acquire_lock, release_lock
@@ -87,6 +89,11 @@ mcp.tool()(validate_checklist)
 
 # --- Metrics ---
 mcp.tool()(get_metrics)
+
+# --- Agents ---
+mcp.tool()(register_agent)
+mcp.tool()(get_agent_profile)
+mcp.tool()(list_agents)
 
 # --- Orchestration ---
 mcp.tool()(submit_request)

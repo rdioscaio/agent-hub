@@ -76,6 +76,15 @@ def _resolve_root_task_id(conn, parent_task_id: str, root_task_id: str) -> str:
     return parent_task_id
 
 
+def _get_active_profile(conn, agent_name: str) -> dict | None:
+    """Fetch active agent profile. Internal helper — NOT an MCP tool."""
+    row = conn.execute(
+        "SELECT * FROM agent_profiles WHERE agent_name = ? AND active = 1",
+        (agent_name,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def _dependencies_satisfied(conn, depends_on: list[str]) -> bool:
     if not depends_on:
         return True
@@ -281,7 +290,13 @@ def claim_next_task(
     requested_agent: str = "",
     limit: int = 100,
 ) -> dict:
-    """Claim the next runnable task for an agent."""
+    """Claim the next runnable task for an agent.
+
+    If the owner has an active agent profile, tasks are ranked by a tuple of
+    (domain_match, kind_match, priority, -created_at) so the agent prefers
+    tasks matching its declared capabilities.  Without a profile, behavior is
+    identical to v3.2 (priority-only ordering with LIMIT).
+    """
     args = dict(
         owner=owner,
         task_kind=task_kind,
@@ -292,6 +307,18 @@ def claim_next_task(
     with audit("claim_next_task", args):
         now = time.time()
         with get_conn() as conn:
+            profile = _get_active_profile(conn, owner)
+
+            # With a profile we need the full candidate set for correct
+            # ranking.  _MAX_CANDIDATES is a safety cap — NOT a semantic
+            # limit.  It exists solely to prevent unbounded queries if the
+            # tasks table grows unexpectedly large.  At normal operating
+            # volumes (tens to hundreds of active tasks) it has no effect.
+            # If a deployment regularly hits this cap, the correct fix is a
+            # composite index (status, domain, priority) with a WHERE
+            # domain IN (...) clause, not raising the cap blindly.
+            query_limit = _MAX_CANDIDATES if profile is not None else limit
+
             rows = conn.execute(
                 """
                 SELECT * FROM tasks
@@ -299,9 +326,11 @@ def claim_next_task(
                 ORDER BY priority DESC, created_at ASC
                 LIMIT ?
                 """,
-                (limit,),
+                (query_limit,),
             ).fetchall()
 
+            # Build candidate list applying existing filters
+            candidates = []
             for row in rows:
                 task = _task_from_row(row)
                 if root_task_id and task.get("root_task_id") != root_task_id:
@@ -321,11 +350,32 @@ def claim_next_task(
                 if task["status"] in ACTIVE_STATES and not _is_expired(task, now):
                     continue
 
+                candidates.append(task)
+
+            # Apply tuple ranking when a profile exists
+            if profile is not None and candidates:
+                agent_domains = set(json.loads(profile["domains"] or "[]"))
+                agent_kinds = set(json.loads(profile["task_kinds"] or "[]"))
+
+                def _rank(task):
+                    domain_match = 1 if (agent_domains and task.get("domain") in agent_domains) else 0
+                    kind_match = 1 if (not agent_kinds or task.get("task_kind") in agent_kinds) else 0
+                    return (domain_match, kind_match, task.get("priority", 5), -(task.get("created_at") or 0))
+
+                candidates.sort(key=_rank, reverse=True)
+
+            # Try to claim the best candidate
+            for task in candidates:
                 result = claim_task(task["id"], owner)
                 if result["ok"]:
                     return result
 
         return {"ok": False, "error": "no claimable task found"}
+
+
+# Safety cap for candidate queries when an agent profile is active.
+# See claim_next_task docstring for rationale.
+_MAX_CANDIDATES = 1000
 
 
 def heartbeat_task(task_id: str, owner: str, status: str = "") -> dict:

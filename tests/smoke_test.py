@@ -27,6 +27,7 @@ from tools.notes import append_note, list_notes
 from tools.memory import query_decisions, recall_memory, record_decision, store_memory
 from tools.metrics import collect_task_metric, get_metrics
 from tools.playbooks import get_playbook, seed_default_playbooks, validate_checklist
+from tools.agents import get_agent_profile, list_agents, register_agent
 from tools.orchestration import list_task_tree, record_review, submit_request, summarize_request
 from tools.tasks import (
     claim_next_task,
@@ -722,6 +723,225 @@ if domain_work["ok"]:
 else:
     check("followup inherits domain from source task", False, "could not claim work task")
     check("followup review inherits domain from source task", False, "skipped")
+
+# ── Agent Profiles ────────────────────────────────────────────────────────────
+print("\n[ Agent Profiles — register_agent ]")
+
+r = register_agent(agent_name="", domains=[])
+check("register_agent rejects empty agent_name", r["ok"] is False and "agent_name" in r["error"])
+
+r = register_agent(agent_name="test-agent", domains=["invalidxyz"])
+check("register_agent rejects invalid domain", r["ok"] is False and "invalid domain" in r["error"])
+
+r = register_agent(agent_name="test-agent", domains=["backend"], task_kinds=["invalidkind"])
+check("register_agent rejects invalid task_kind", r["ok"] is False and "invalid task_kind" in r["error"])
+
+r = register_agent(agent_name="test-agent", domains=["backend"], max_concurrent=0)
+check("register_agent rejects max_concurrent < 1", r["ok"] is False and "max_concurrent" in r["error"])
+
+r = register_agent(agent_name="test-agent", domains=["backend"], active=2)
+check("register_agent rejects active not in {0,1}", r["ok"] is False and "active must be" in r["error"])
+
+r = register_agent(agent_name="backend-agent", domains=["backend", "database"], task_kinds=["work"])
+check("register_agent creates profile", r["ok"] is True and r["created"] is True)
+check("register_agent returns profile", r["profile"]["agent_name"] == "backend-agent")
+check("register_agent domains parsed", r["profile"]["domains"] == ["backend", "database"])
+
+r = register_agent(agent_name="backend-agent", domains=["backend"], task_kinds=["work", "review"])
+check("register_agent upsert updates", r["ok"] is True and r["created"] is False)
+check("register_agent upsert changed domains", r["profile"]["domains"] == ["backend"])
+
+r = register_agent(agent_name="backend-agent", domains=["backend"], active=0)
+check("register_agent deactivates", r["ok"] is True and r["profile"]["active"] == 0)
+
+r = register_agent(agent_name="backend-agent", domains=["backend"], active=1)
+check("register_agent reactivates", r["ok"] is True and r["profile"]["active"] == 1)
+
+r = register_agent(agent_name="generalist-agent", domains=[], task_kinds=[])
+check("register_agent accepts domains=[] (generalist)", r["ok"] is True and r["profile"]["domains"] == [])
+
+print("\n[ Agent Profiles — get_agent_profile ]")
+
+r = get_agent_profile(agent_name="backend-agent")
+check("get_agent_profile returns profile", r["ok"] is True and r["profile"]["agent_name"] == "backend-agent")
+
+r = get_agent_profile(agent_name="nonexistent-agent")
+check("get_agent_profile returns error for missing", r["ok"] is False and "not found" in r["error"])
+
+r = get_agent_profile(agent_name="")
+check("get_agent_profile rejects empty name", r["ok"] is False and "agent_name" in r["error"])
+
+print("\n[ Agent Profiles — list_agents ]")
+
+# Register a frontend agent for filtering tests
+register_agent(agent_name="frontend-agent", domains=["frontend"])
+
+r = list_agents()
+check("list_agents returns all active", r["ok"] is True and r["count"] >= 3)
+agent_names = [a["agent_name"] for a in r["agents"]]
+check("list_agents includes backend-agent", "backend-agent" in agent_names)
+check("list_agents includes generalist-agent", "generalist-agent" in agent_names)
+check("list_agents includes frontend-agent", "frontend-agent" in agent_names)
+
+r = list_agents(domain="backend")
+check("list_agents filters by domain", r["ok"] is True and r["count"] >= 1)
+check("list_agents domain filter excludes generalist",
+      all(a["agent_name"] != "generalist-agent" for a in r["agents"]))
+
+r = list_agents(domain="invalidxyz")
+check("list_agents rejects invalid domain", r["ok"] is False and "invalid domain" in r["error"])
+
+# Deactivate frontend-agent, verify active_only filtering
+register_agent(agent_name="frontend-agent", domains=["frontend"], active=0)
+r = list_agents(domain="frontend")
+check("list_agents excludes inactive by default", r["count"] == 0)
+
+r = list_agents(domain="frontend", active_only=False)
+check("list_agents includes inactive when active_only=False", r["count"] >= 1)
+
+# Reactivate for matching tests
+register_agent(agent_name="frontend-agent", domains=["frontend"], active=1)
+
+# ── Agent Profiles — claim_next_task matching ────────────────────────────────
+print("\n[ Agent Profiles — claim_next_task matching ]")
+
+# All matching tests are scoped under a dedicated root to avoid leaking
+# candidates from earlier test sections.
+_match_root = create_task("matching test root", task_kind="request")
+_mr = _match_root["task_id"]
+
+# Create tasks with known domains and priorities for matching tests
+# Backend task p=3, Frontend task p=8
+bt = create_task("fix API auth endpoint", priority=3, domain="backend", root_task_id=_mr, parent_task_id=_mr)
+bt_id = bt["task_id"]
+ft = create_task("create react modal component", priority=8, domain="frontend", root_task_id=_mr, parent_task_id=_mr)
+ft_id = ft["task_id"]
+
+# Test: agent without profile → legacy behavior (priority wins)
+r = claim_next_task(owner="no-profile-agent", root_task_id=_mr)
+check("no profile → legacy priority order",
+      r["ok"] is True and r["task_id"] == ft_id,
+      f"got {r.get('task_id', 'none')}, expected {ft_id}")
+
+# Unclaim by completing that task
+complete_task(ft_id, "no-profile-agent")
+
+# Recreate frontend task for next tests
+ft2 = create_task("build responsive sidebar layout", priority=8, domain="frontend", root_task_id=_mr, parent_task_id=_mr)
+ft2_id = ft2["task_id"]
+
+# Test: backend-agent prefers backend task even though frontend has higher priority
+r = claim_next_task(owner="backend-agent", root_task_id=_mr)
+check("domain_match beats higher priority",
+      r["ok"] is True and r["task_id"] == bt_id,
+      f"got {r.get('task_id', 'none')}, expected {bt_id}")
+complete_task(bt_id, "backend-agent")
+
+# Test: backend-agent falls back to frontend if no backend available
+r = claim_next_task(owner="backend-agent", root_task_id=_mr)
+check("fallback to non-matching domain",
+      r["ok"] is True and r["task_id"] == ft2_id,
+      f"got {r.get('task_id', 'none')}, expected {ft2_id}")
+complete_task(ft2_id, "backend-agent")
+
+# Test: generalist with domains=[] → no domain bonus, priority wins
+gt1 = create_task("fix server middleware route", priority=3, domain="backend", root_task_id=_mr, parent_task_id=_mr)
+gt1_id = gt1["task_id"]
+gt2 = create_task("update readme file", priority=8, domain="general", root_task_id=_mr, parent_task_id=_mr)
+gt2_id = gt2["task_id"]
+
+r = claim_next_task(owner="generalist-agent", root_task_id=_mr)
+check("generalist domains=[] → priority wins (no domain bonus)",
+      r["ok"] is True and r["task_id"] == gt2_id,
+      f"got {r.get('task_id', 'none')}, expected {gt2_id}")
+complete_task(gt2_id, "generalist-agent")
+complete_task(gt1_id, "generalist-agent")  # cleanup
+
+# Test: kind_match works
+register_agent(agent_name="reviewer-agent", domains=[], task_kinds=["review"])
+kt_work = create_task("implement feature X", priority=8, task_kind="work", domain="general", root_task_id=_mr, parent_task_id=_mr)
+kt_work_id = kt_work["task_id"]
+kt_review = create_task("review feature X", priority=3, task_kind="review", domain="general", root_task_id=_mr, parent_task_id=_mr)
+kt_review_id = kt_review["task_id"]
+
+r = claim_next_task(owner="reviewer-agent", root_task_id=_mr)
+check("kind_match prefers matching task_kind",
+      r["ok"] is True and r["task_id"] == kt_review_id,
+      f"got {r.get('task_id', 'none')}, expected {kt_review_id}")
+complete_task(kt_review_id, "reviewer-agent")
+complete_task(kt_work_id, "reviewer-agent")  # cleanup
+
+# Test: inactive profile → treated as no profile (legacy)
+register_agent(agent_name="inactive-specialist", domains=["frontend"], active=0)
+it1 = create_task("fix server route handler", priority=8, domain="backend", root_task_id=_mr, parent_task_id=_mr)
+it1_id = it1["task_id"]
+it2 = create_task("fix button css style", priority=3, domain="frontend", root_task_id=_mr, parent_task_id=_mr)
+it2_id = it2["task_id"]
+
+r = claim_next_task(owner="inactive-specialist", root_task_id=_mr)
+check("inactive profile → legacy priority order",
+      r["ok"] is True and r["task_id"] == it1_id,
+      f"got {r.get('task_id', 'none')}, expected {it1_id}")
+complete_task(it1_id, "inactive-specialist")
+complete_task(it2_id, "inactive-specialist")  # cleanup
+
+# Test: requested_agent still has precedence
+register_agent(agent_name="agent-x", domains=["backend"])
+ra_task = create_task("specific task for agent-y", priority=5, domain="backend", requested_agent="agent-y", root_task_id=_mr, parent_task_id=_mr)
+ra_task_id = ra_task["task_id"]
+ra_open = create_task("open backend task", priority=3, domain="backend", root_task_id=_mr, parent_task_id=_mr)
+ra_open_id = ra_open["task_id"]
+
+r = claim_next_task(owner="agent-x", root_task_id=_mr)
+check("requested_agent preserves precedence",
+      r["ok"] is True and r["task_id"] == ra_open_id,
+      f"got {r.get('task_id', 'none')}, expected {ra_open_id}")
+complete_task(ra_open_id, "agent-x")
+# Cleanup: claim then complete the requested_agent task
+claim_task(ra_task_id, "agent-y")
+complete_task(ra_task_id, "agent-y")
+
+# Test: domain "general" → any agent can claim
+gen_task = create_task("update docs", priority=5, domain="general", root_task_id=_mr, parent_task_id=_mr)
+gen_task_id = gen_task["task_id"]
+r = claim_next_task(owner="backend-agent", root_task_id=_mr)
+check("any agent can claim general domain task",
+      r["ok"] is True and r["task_id"] == gen_task_id,
+      f"got {r.get('task_id', 'none')}, expected {gen_task_id}")
+complete_task(gen_task_id, "backend-agent")
+
+# Test: two agents with different profiles each prefer their domain
+da_be = create_task("fix auth middleware route", priority=5, domain="backend", root_task_id=_mr, parent_task_id=_mr)
+da_be_id = da_be["task_id"]
+da_fe = create_task("fix modal css layout", priority=5, domain="frontend", root_task_id=_mr, parent_task_id=_mr)
+da_fe_id = da_fe["task_id"]
+
+r1 = claim_next_task(owner="backend-agent", root_task_id=_mr)
+check("backend-agent picks backend task",
+      r1["ok"] is True and r1["task_id"] == da_be_id,
+      f"got {r1.get('task_id', 'none')}, expected {da_be_id}")
+
+r2 = claim_next_task(owner="frontend-agent", root_task_id=_mr)
+check("frontend-agent picks frontend task",
+      r2["ok"] is True and r2["task_id"] == da_fe_id,
+      f"got {r2.get('task_id', 'none')}, expected {da_fe_id}")
+
+complete_task(da_be_id, "backend-agent")
+complete_task(da_fe_id, "frontend-agent")
+
+# Test: FIFO tiebreak (same domain_match, same kind_match, same priority)
+fifo_1 = create_task("first backend task", priority=5, domain="backend", root_task_id=_mr, parent_task_id=_mr)
+fifo_1_id = fifo_1["task_id"]
+time.sleep(0.05)
+fifo_2 = create_task("second backend task", priority=5, domain="backend", root_task_id=_mr, parent_task_id=_mr)
+fifo_2_id = fifo_2["task_id"]
+
+r = claim_next_task(owner="backend-agent", root_task_id=_mr)
+check("FIFO tiebreak: older task first",
+      r["ok"] is True and r["task_id"] == fifo_1_id,
+      f"got {r.get('task_id', 'none')}, expected {fifo_1_id}")
+complete_task(fifo_1_id, "backend-agent")
+complete_task(fifo_2_id, "backend-agent")  # cleanup
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 passed = sum(_results)

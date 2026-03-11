@@ -128,6 +128,17 @@ CREATE TABLE IF NOT EXISTS retrospectives (
     generated_by    TEXT,
     created_at      REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS agent_profiles (
+    id             TEXT PRIMARY KEY,
+    agent_name     TEXT UNIQUE NOT NULL,
+    domains        TEXT NOT NULL DEFAULT '[]',
+    task_kinds     TEXT NOT NULL DEFAULT '[]',
+    max_concurrent INTEGER NOT NULL DEFAULT 3,
+    active         INTEGER NOT NULL DEFAULT 1,
+    created_at     REAL NOT NULL,
+    updated_at     REAL NOT NULL
+);
 """
 
 _TASK_MIGRATIONS = {
@@ -158,6 +169,8 @@ _INDEXES = (
     # F3: Metrics
     "CREATE INDEX IF NOT EXISTS idx_metrics_domain_created ON task_metrics(domain, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_metrics_agent_created ON task_metrics(agent, created_at DESC)",
+    # Agent Profiles
+    "CREATE INDEX IF NOT EXISTS idx_agent_profiles_name_active ON agent_profiles(agent_name, active)",
 )
 
 
