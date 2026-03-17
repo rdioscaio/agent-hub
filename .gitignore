@@ -35,3 +35,6 @@ agent_hub.db
 
 # Local settings (personal permissions/hooks)
 .claude/settings.local.json
+
+# Auto-generated session checkpoint (updated on every Stop hook)
+notes/session-checkpoint.md
