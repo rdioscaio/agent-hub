@@ -7,10 +7,14 @@ Run from project root:
 Tests call tool functions directly (no MCP protocol overhead).
 """
 
+import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
+from contextlib import redirect_stdout
+from io import StringIO
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -19,16 +23,28 @@ _tmp = tempfile.mktemp(suffix=".sqlite")
 os.environ["HUB_DB_PATH"] = _tmp
 
 from hub.bootstrap import ensure_ready
-from hub.db import init_db
+from hub.db import get_conn, init_db
 from hub.domain import VALID_DOMAINS, classify_domain
+from hub_cli import main as hub_cli_main
 from tools.artifacts import publish_artifact, read_artifact
 from tools.locks import acquire_lock, release_lock
+from tools.knowledge import (
+    approve_knowledge,
+    deprecate_knowledge,
+    promote_knowledge,
+    query_knowledge,
+    supersede_knowledge,
+    VALID_KNOWLEDGE_KINDS,
+    VALID_KNOWLEDGE_SOURCE_TYPES,
+    VALID_KNOWLEDGE_STATUSES,
+)
 from tools.notes import append_note, list_notes
 from tools.memory import query_decisions, recall_memory, record_decision, store_memory
 from tools.metrics import collect_task_metric, get_metrics
-from tools.playbooks import get_playbook, seed_default_playbooks, validate_checklist
+from tools.playbooks import get_playbook, seed_default_playbooks, upgrade_default_playbooks, validate_checklist
 from tools.agents import get_agent_profile, list_agents, register_agent
 from tools.orchestration import list_task_tree, record_review, submit_request, summarize_request
+from tools.retrospectives import generate_retrospective, get_retrospective
 from tools.tasks import (
     claim_next_task,
     claim_task,
@@ -53,6 +69,16 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 def first_task(tasks: list[dict], task_kind: str) -> dict | None:
     return next((task for task in tasks if task.get("task_kind") == task_kind), None)
+
+
+def run_cli(args: list[str]) -> tuple[int, dict, str]:
+    """Run hub_cli.main() and capture its JSON output."""
+    buf = StringIO()
+    with redirect_stdout(buf):
+        exit_code = hub_cli_main(args)
+    raw = buf.getvalue().strip()
+    parsed = json.loads(raw) if raw else {}
+    return exit_code, parsed, raw
 
 
 # ── Setup ────────────────────────────────────────────────────────────────────
@@ -204,7 +230,6 @@ r = submit_request(
     worker_agent="codex",
     reviewer_agent="claude",
     fallback_agent="gpt-fallback",
-    synthesizer_agent="codex",
     max_work_items=2,
 )
 check("submit_request creates a task tree", r["ok"] is True and r["task_count"] >= 3)
@@ -212,6 +237,10 @@ request_root_id = r["root_task_id"]
 
 tree = list_task_tree(request_root_id)
 check("list_task_tree returns rooted hierarchy", tree["ok"] is True and tree["summary"]["total"] >= 4)
+synth = first_task(tree["tasks"], "synthesize")
+check("submit_request default synthesizer is codex-general",
+      synth is not None and synth["requested_agent"] == "codex-general",
+      f"requested_agent={synth.get('requested_agent') if synth else 'none'}")
 
 status = summarize_request(request_root_id)
 check("summarize_request lists ready work", status["ok"] is True and any(t["requested_agent"] == "codex" for t in status["ready_tasks"]))
@@ -259,6 +288,12 @@ check("store_memory rejects confidence > 1.0", r["ok"] is False and "confidence"
 
 r = store_memory(domain="backend", content="test", author="claude", confidence=-0.1)
 check("store_memory rejects confidence < 0.0", r["ok"] is False and "confidence" in r["error"])
+
+r = store_memory(domain="arch", content="Use module boundaries for shared services", author="claude")
+check("store_memory normalizes arch to architecture", r["ok"] is True and r["domain"] == "architecture")
+
+r = store_memory(domain="invalidxyz", content="test", author="claude")
+check("store_memory rejects invalid domain", r["ok"] is False and "invalid domain" in r["error"])
 
 r = store_memory(
     domain="backend",
@@ -341,6 +376,24 @@ r = record_decision(domain="backend", question="q", decision="d", rationale="r",
 check("record_decision rejects empty decided_by", r["ok"] is False and "decided_by" in r["error"])
 
 r = record_decision(
+    domain="arch",
+    question="Como organizar os módulos?",
+    decision="Feature modules",
+    rationale="Reduz acoplamento e deixa as fronteiras explícitas",
+    decided_by="claude",
+)
+check("record_decision normalizes arch to architecture", r["ok"] is True and r["domain"] == "architecture")
+
+r = record_decision(
+    domain="invalidxyz",
+    question="q",
+    decision="d",
+    rationale="r",
+    decided_by="claude",
+)
+check("record_decision rejects invalid domain", r["ok"] is False and "invalid domain" in r["error"])
+
+r = record_decision(
     domain="backend",
     question="Qual ORM usar para o BPM Editor?",
     decision="Prisma",
@@ -350,6 +403,7 @@ r = record_decision(
     reviewed_by="gpt",
 )
 check("record_decision creates record", r["ok"] is True and r["domain"] == "backend")
+decision_id_1 = r["decision_id"]
 
 r = record_decision(
     domain="frontend",
@@ -360,6 +414,7 @@ r = record_decision(
     decided_by="claude",
 )
 check("record_decision creates second record", r["ok"] is True)
+decision_id_2 = r["decision_id"]
 
 print("\n[ Memory — query_decisions ]")
 
@@ -382,15 +437,201 @@ check("query_decisions searches decision field", r["count"] >= 1)
 r = query_decisions(keyword="xyznonexistent")
 check("query_decisions returns empty for no match", r["count"] == 0)
 
+# ── Knowledge — lifecycle ─────────────────────────────────────────────────────
+print("\n[ Knowledge — lifecycle ]")
+
+r = promote_knowledge(
+    slug="",
+    domain="backend",
+    kind="pattern",
+    title="t",
+    content="c",
+    source_type="manual",
+    promoted_by="claude",
+)
+check("promote_knowledge rejects empty slug", r["ok"] is False and "slug" in r["error"])
+
+r = promote_knowledge(
+    slug="knowledge-invalid-domain",
+    domain="invalidxyz",
+    kind="pattern",
+    title="t",
+    content="c",
+    source_type="manual",
+    promoted_by="claude",
+)
+check("promote_knowledge rejects invalid domain", r["ok"] is False and "invalid domain" in r["error"])
+
+r = promote_knowledge(
+    slug="knowledge-invalid-kind",
+    domain="backend",
+    kind="invalidkind",
+    title="t",
+    content="c",
+    source_type="manual",
+    promoted_by="claude",
+)
+check("promote_knowledge rejects invalid kind", r["ok"] is False and "invalid kind" in r["error"])
+
+r = promote_knowledge(
+    slug="knowledge-missing-source",
+    domain="backend",
+    kind="pattern",
+    title="t",
+    content="c",
+    source_type="memory",
+    promoted_by="claude",
+)
+check("promote_knowledge requires source_id for non-manual source", r["ok"] is False and "source_id" in r["error"])
+
+r = promote_knowledge(
+    slug="knowledge-missing-row",
+    domain="backend",
+    kind="pattern",
+    title="t",
+    content="c",
+    source_type="decision",
+    source_id="missing-id",
+    promoted_by="claude",
+)
+check("promote_knowledge validates source existence", r["ok"] is False and "not found" in r["error"])
+
+r = promote_knowledge(
+    slug="backend-neon-guideline",
+    domain="backend",
+    kind="guideline",
+    title="Neon websocket guideline",
+    content="Prefer websocket proxy for realtime notifications.",
+    source_type="memory",
+    source_id=mem_id_2,
+    promoted_by="claude",
+    tags=["neon", "realtime"],
+)
+check("promote_knowledge creates draft from memory", r["ok"] is True and r["status"] == "draft" and r["version"] == 1)
+knowledge_mem_v1 = r["knowledge_id"]
+
+r = query_knowledge(slug="backend-neon-guideline")
+check("query_knowledge default excludes draft entries", r["ok"] is True and r["count"] == 0)
+
+r = approve_knowledge(knowledge_mem_v1, reviewed_by="gpt")
+check(
+    "approve_knowledge activates draft with independent reviewer",
+    r["ok"] is True and r["status"] == "active" and r["same_author_warning"] is False,
+)
+
+r = query_knowledge(slug="backend-neon-guideline")
+check(
+    "query_knowledge by slug returns active version only",
+    r["ok"] is True and r["count"] == 1 and r["knowledge"][0]["id"] == knowledge_mem_v1 and r["knowledge"][0]["version"] == 1,
+)
+
+r = query_knowledge(slug="backend-neon-guideline", status="draft")
+check("query_knowledge with explicit draft status excludes approved slug", r["ok"] is True and r["count"] == 0)
+
+r = promote_knowledge(
+    slug="backend-neon-guideline",
+    domain="backend",
+    kind="guideline",
+    title="Duplicate open slug",
+    content="Should fail while active exists.",
+    source_type="manual",
+    promoted_by="claude",
+)
+check("promote_knowledge rejects duplicate open slug", r["ok"] is False and "open entry" in r["error"])
+
+r = promote_knowledge(
+    slug="backend-orm-architecture",
+    domain="backend",
+    kind="architecture",
+    title="ORM architecture decision",
+    content="Use Prisma for backend services.",
+    source_type="decision",
+    source_id=decision_id_1,
+    promoted_by="claude",
+    tags=["orm", "prisma"],
+)
+check("promote_knowledge creates draft from decision", r["ok"] is True and r["status"] == "draft")
+knowledge_decision_v1 = r["knowledge_id"]
+
+r = approve_knowledge(knowledge_decision_v1, reviewed_by="claude")
+check(
+    "approve_knowledge returns same-author warning advisory",
+    r["ok"] is True and r["status"] == "active" and r["same_author_warning"] is True,
+)
+
+r = query_knowledge(domain="backend", kind="architecture")
+check(
+    "query_knowledge filters by domain and kind",
+    r["ok"] is True and any(entry["id"] == knowledge_decision_v1 for entry in r["knowledge"]),
+)
+
+r = supersede_knowledge(knowledge_mem_v1, updated_by="claude")
+check("supersede_knowledge requires title or content change", r["ok"] is False and "new_title" in r["error"])
+
+r = supersede_knowledge(
+    knowledge_mem_v1,
+    updated_by="claude",
+    new_content="Prefer websocket proxy since Neon v2 for realtime notifications.",
+    tags=["neon", "websocket"],
+)
+check("supersede_knowledge creates new active version", r["ok"] is True and r["new_version"] == 2)
+knowledge_mem_v2 = r["new_id"]
+
+r = query_knowledge(slug="backend-neon-guideline")
+check(
+    "query_knowledge returns newest active superseded version by slug",
+    r["ok"] is True
+    and r["count"] == 1
+    and r["knowledge"][0]["id"] == knowledge_mem_v2
+    and r["knowledge"][0]["version"] == 2
+    and "Neon v2" in r["knowledge"][0]["content"],
+)
+
+r = query_knowledge(slug="backend-neon-guideline", status="superseded")
+check(
+    "query_knowledge returns historical superseded version explicitly",
+    r["ok"] is True and r["count"] == 1 and r["knowledge"][0]["id"] == knowledge_mem_v1,
+)
+
+r = query_knowledge(domain="backend", keyword="websocket")
+check(
+    "query_knowledge keyword search matches title and content",
+    r["ok"] is True and any(entry["id"] == knowledge_mem_v2 for entry in r["knowledge"]),
+)
+
+r = query_knowledge(slug="backend-neon-guideline", tags=["neon", "websocket"])
+check(
+    "query_knowledge filters by tag intersection",
+    r["ok"] is True and r["count"] == 1 and r["knowledge"][0]["id"] == knowledge_mem_v2,
+)
+
+r = query_knowledge(status="invalidxyz")
+check("query_knowledge rejects invalid status", r["ok"] is False and "invalid status" in r["error"])
+
+r = deprecate_knowledge(knowledge_decision_v1, deprecated_by="claude", reason="Replaced by ADR-002")
+check("deprecate_knowledge marks active entry deprecated", r["ok"] is True and r["status"] == "deprecated")
+
+r = query_knowledge(slug="backend-orm-architecture")
+check("query_knowledge default excludes deprecated entries", r["ok"] is True and r["count"] == 0)
+
+r = query_knowledge(slug="backend-orm-architecture", status="deprecated")
+check(
+    "query_knowledge returns deprecated entries when requested",
+    r["ok"] is True
+    and r["count"] == 1
+    and r["knowledge"][0]["id"] == knowledge_decision_v1
+    and r["knowledge"][0]["deprecation_reason"] == "Replaced by ADR-002",
+)
+
 # ── Playbooks (F2) ──────────────────────────────────────────────────────────
 print("\n[ Playbooks — seed ]")
 
 r = seed_default_playbooks()
 # ensure_ready() already seeded at startup, so created may be 0 (idempotent)
-check("seed creates default playbooks", r["ok"] is True and (r["created"] + r["skipped"]) == 3)
+check("seed creates default playbooks", r["ok"] is True and (r["created"] + r["skipped"]) == 12)
 
 r2 = seed_default_playbooks()
-check("seed is idempotent (no duplicates)", r2["ok"] is True and r2["created"] == 0 and r2["skipped"] == 3)
+check("seed is idempotent (no duplicates)", r2["ok"] is True and r2["created"] == 0 and r2["skipped"] == 12)
 
 print("\n[ Playbooks — get_playbook ]")
 
@@ -407,6 +648,8 @@ check("get_playbook checklist is limited to 4", len(r["playbook"]["checklist"]) 
 
 r = get_playbook(task_kind="review")
 check("get_playbook returns generic review playbook", r["ok"] is True and r["playbook"]["task_kind"] == "review")
+check("generic review playbook documents GPT consult note convention",
+      r["ok"] is True and "[GPT-CONSULT]" in r["playbook"]["steps"][3])
 
 r = get_playbook(task_kind="work", domain="backend")
 check("get_playbook returns backend-specific work playbook", r["ok"] is True and r["playbook"]["domain"] == "backend")
@@ -414,8 +657,128 @@ check("get_playbook returns backend-specific work playbook", r["ok"] is True and
 r = get_playbook(task_kind="review", domain="backend")
 check("get_playbook falls back from backend to generic for review", r["ok"] is True and r["playbook"]["domain"] == "*")
 
+r = get_playbook(task_kind="work", domain="frontend")
+check("get_playbook returns frontend-specific work playbook",
+      r["ok"] is True and r["playbook"]["domain"] == "frontend")
+check("frontend work playbook uses ui-evidence artifact convention",
+      r["ok"] is True and "ui-evidence-{task_id}" in r["playbook"]["steps"][4])
+check("frontend work playbook is advisory",
+      r["ok"] is True and r["playbook"].get("enforcement") == "advisory")
+
+r = get_playbook(task_kind="review", domain="frontend")
+check("get_playbook returns frontend-specific review playbook",
+      r["ok"] is True and r["playbook"]["domain"] == "frontend")
+check("frontend review playbook uses source_task_id evidence convention",
+      r["ok"] is True and "ui-evidence-{source_task_id}" in r["playbook"]["steps"][1])
+check("frontend review playbook is advisory",
+      r["ok"] is True and r["playbook"].get("enforcement") == "advisory")
+
+r = get_playbook(task_kind="work", domain="architecture")
+check("get_playbook returns architecture-specific work playbook",
+      r["ok"] is True and r["playbook"]["domain"] == "architecture")
+check("architecture work playbook uses arch-decision artifact convention",
+      r["ok"] is True and "arch-decision-{task_id}" in r["playbook"]["steps"][3])
+check("architecture work playbook documents GPT counterpoint step",
+      r["ok"] is True and "ask_gpt" in r["playbook"]["steps"][2] and "[GPT-CONSULT]" in r["playbook"]["steps"][2])
+check("architecture work playbook requires explicit decision linkage",
+      r["ok"] is True and "source_task_id=<task_id>" in r["playbook"]["steps"][4] and "root_task_id=<root_task_id>" in r["playbook"]["steps"][4])
+check("architecture work playbook is advisory",
+      r["ok"] is True and r["playbook"].get("enforcement") == "advisory")
+
+r = get_playbook(task_kind="review", domain="architecture")
+check("get_playbook returns architecture-specific review playbook",
+      r["ok"] is True and r["playbook"]["domain"] == "architecture")
+check("architecture review playbook uses source_task_id artifact convention",
+      r["ok"] is True and "arch-decision-{source_task_id}" in r["playbook"]["steps"][0])
+check("architecture review playbook documents GPT consult note convention",
+      r["ok"] is True and "ask_gpt" in r["playbook"]["steps"][4] and "[GPT-CONSULT]" in r["playbook"]["steps"][4])
+check("architecture review playbook is advisory",
+      r["ok"] is True and r["playbook"].get("enforcement") == "advisory")
+
+r = get_playbook(task_kind="work", domain="automation")
+check("get_playbook returns automation-specific work playbook",
+      r["ok"] is True and r["playbook"]["domain"] == "automation")
+check("automation work playbook uses flow-definition artifact convention",
+      r["ok"] is True and "flow-definition-{task_id}" in r["playbook"]["steps"][1])
+
+r = get_playbook(task_kind="review", domain="automation")
+check("get_playbook returns automation-specific review playbook",
+      r["ok"] is True and r["playbook"]["domain"] == "automation")
+check("automation review playbook uses source_task_id artifact convention",
+      r["ok"] is True and "flow-definition-{source_task_id}" in r["playbook"]["steps"][0])
+
+r = get_playbook(task_kind="synthesize", domain="automation")
+check("get_playbook falls back from automation synthesize to generic",
+      r["ok"] is True and r["playbook"]["domain"] == "*")
+
+r = get_playbook(task_kind="work", domain="process")
+check("get_playbook returns process-specific work playbook",
+      r["ok"] is True and r["playbook"]["domain"] == "process")
+check("process work playbook uses doc artifact convention",
+      r["ok"] is True and "doc-{task_id}" in r["playbook"]["steps"][3])
+check("process work playbook is advisory",
+      r["ok"] is True and r["playbook"].get("enforcement") == "advisory")
+
+r = get_playbook(task_kind="review", domain="process")
+check("get_playbook returns process-specific review playbook",
+      r["ok"] is True and r["playbook"]["domain"] == "process")
+check("process review playbook uses source_task_id doc convention",
+      r["ok"] is True and "doc-{source_task_id}" in r["playbook"]["steps"][0])
+check("process review playbook is advisory",
+      r["ok"] is True and r["playbook"].get("enforcement") == "advisory")
+
 r = get_playbook(task_kind="rework", domain="frontend")
 check("get_playbook returns error when no playbook exists", r["ok"] is False and "no playbook found" in r["error"])
+
+print("\n[ Playbooks — policy upgrade ]")
+
+with get_conn() as conn:
+    conn.execute("UPDATE playbooks SET active = 0 WHERE task_kind = 'review' AND domain = '*'")
+    conn.execute(
+        """
+        INSERT INTO playbooks
+            (id, task_kind, domain, steps, checklist, enforcement, version, active, created_at, updated_at)
+        VALUES (?, 'review', '*', ?, ?, 'advisory', 1, 1, ?, ?)
+        """,
+        (
+            "legacy-review-generic-v1",
+            json.dumps([
+                "1. Ler artifact da work task (via source_task_id)",
+                "2. Comparar com pedido original (root task description)",
+                "3. Avaliar: correção, completude, edge cases ignorados",
+                "4. Se usar ask_gpt como contraponto, enviar com data_policy='snippets'",
+            ], ensure_ascii=False),
+            json.dumps([
+                "Leu artifact da work task?",
+                "Comparou com pedido original?",
+                "Feedback é específico e acionável?",
+                "Verdict é justificado?",
+            ], ensure_ascii=False),
+            time.time(),
+            time.time(),
+        ),
+    )
+
+r = upgrade_default_playbooks()
+check("upgrade_default_playbooks upgrades legacy generic review playbook",
+      r["ok"] is True and r["upgraded"] >= 1,
+      f"got: {r}")
+
+with get_conn() as conn:
+    _generic_review_active = conn.execute(
+        "SELECT version, steps FROM playbooks WHERE task_kind = 'review' AND domain = '*' AND active = 1 "
+        "ORDER BY version DESC LIMIT 1"
+    ).fetchone()
+check("upgraded generic review playbook is active with newer version",
+      _generic_review_active is not None and _generic_review_active["version"] >= 2,
+      f"got: {dict(_generic_review_active) if _generic_review_active else 'none'}")
+check("upgraded generic review playbook preserves GPT consult note convention",
+      _generic_review_active is not None and "[GPT-CONSULT]" in json.loads(_generic_review_active["steps"])[3])
+
+r = upgrade_default_playbooks()
+check("upgrade_default_playbooks is idempotent after migration",
+      r["ok"] is True and r["upgraded"] == 0,
+      f"got: {r}")
 
 print("\n[ Playbooks — validate_checklist ]")
 
@@ -579,11 +942,208 @@ ensure_ready()
 from hub.db import get_conn as _get_conn2
 with _get_conn2() as _conn2:
     _pb_count = _conn2.execute("SELECT COUNT(*) as cnt FROM playbooks WHERE active = 1").fetchone()["cnt"]
-check("ensure_ready is idempotent", _pb_count == 3)
+check("ensure_ready is idempotent", _pb_count == 12)
 
 # Verify DB is initialized (create_task works — already proven above, but explicit)
 r = create_task("Bootstrap test task")
 check("ensure_ready initializes db", r["ok"] is True)
+
+# ── Knowledge — schema ────────────────────────────────────────────────────────
+print("\n[ Knowledge — schema ]")
+
+with get_conn() as _conn3:
+    _table = _conn3.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_entries'"
+    ).fetchone()
+check("knowledge_entries table exists", _table is not None)
+
+with get_conn() as _conn3:
+    _columns = {row["name"] for row in _conn3.execute("PRAGMA table_info(knowledge_entries)").fetchall()}
+_expected_columns = {
+    "id",
+    "slug",
+    "version",
+    "domain",
+    "kind",
+    "title",
+    "content",
+    "status",
+    "tags",
+    "source_type",
+    "source_id",
+    "source_task_id",
+    "root_task_id",
+    "superseded_by",
+    "deprecation_reason",
+    "promoted_by",
+    "reviewed_by",
+    "created_at",
+    "updated_at",
+}
+_missing_columns = sorted(_expected_columns - _columns)
+check("knowledge_entries has expected columns", not _missing_columns, detail=", ".join(_missing_columns))
+
+with get_conn() as _conn3:
+    _index_rows = _conn3.execute("PRAGMA index_list(knowledge_entries)").fetchall()
+    _indexes = {row["name"]: row for row in _index_rows}
+_expected_indexes = {
+    "idx_knowledge_domain_status",
+    "idx_knowledge_kind_status",
+    "idx_knowledge_slug_status",
+    "idx_knowledge_source",
+    "idx_knowledge_one_open_per_slug",
+}
+_missing_indexes = sorted(_expected_indexes - set(_indexes))
+check("knowledge_entries has expected indexes", not _missing_indexes, detail=", ".join(_missing_indexes))
+check(
+    "knowledge open-slug index is unique",
+    "idx_knowledge_one_open_per_slug" in _indexes and _indexes["idx_knowledge_one_open_per_slug"]["unique"] == 1,
+)
+check("knowledge kinds constant is populated", "architecture" in VALID_KNOWLEDGE_KINDS and "pattern" in VALID_KNOWLEDGE_KINDS)
+check(
+    "knowledge source types are limited to memory decision manual",
+    VALID_KNOWLEDGE_SOURCE_TYPES == frozenset({"memory", "decision", "manual"}),
+)
+check("knowledge statuses include draft and deprecated", {"draft", "deprecated"}.issubset(VALID_KNOWLEDGE_STATUSES))
+
+_now = time.time()
+_duplicate_version_rejected = False
+_second_open_rejected = False
+_historical_version_allowed = False
+with get_conn() as _conn3:
+    _conn3.execute(
+        """
+        INSERT INTO knowledge_entries
+            (id, slug, version, domain, kind, title, content, status, tags,
+             source_type, source_id, source_task_id, root_task_id, superseded_by,
+             deprecation_reason, promoted_by, reviewed_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "knowledge-draft-v1",
+            "backend-jwt-schema-test",
+            1,
+            "backend",
+            "reference",
+            "JWT schema test",
+            "Active draft row for schema validation",
+            "draft",
+            "[]",
+            "manual",
+            None,
+            None,
+            None,
+            None,
+            None,
+            "claude",
+            None,
+            _now,
+            _now,
+        ),
+    )
+    try:
+        _conn3.execute(
+            """
+            INSERT INTO knowledge_entries
+                (id, slug, version, domain, kind, title, content, status, tags,
+                 source_type, source_id, source_task_id, root_task_id, superseded_by,
+                 deprecation_reason, promoted_by, reviewed_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "knowledge-active-v2",
+                "backend-jwt-schema-test",
+                2,
+                "backend",
+                "reference",
+                "JWT schema test v2",
+                "Second open row should be rejected",
+                "active",
+                "[]",
+                "manual",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "claude",
+                "claude",
+                _now,
+                _now,
+            ),
+        )
+    except sqlite3.IntegrityError:
+        _second_open_rejected = True
+
+    _conn3.execute(
+        """
+        INSERT INTO knowledge_entries
+            (id, slug, version, domain, kind, title, content, status, tags,
+             source_type, source_id, source_task_id, root_task_id, superseded_by,
+             deprecation_reason, promoted_by, reviewed_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "knowledge-superseded-v2",
+            "backend-jwt-schema-test",
+            2,
+            "backend",
+            "reference",
+            "JWT schema test history",
+            "Historical row should be allowed",
+            "superseded",
+            "[]",
+            "manual",
+            None,
+            None,
+            None,
+            None,
+            None,
+            "claude",
+            "claude",
+            _now,
+            _now,
+        ),
+    )
+    _historical_version_allowed = True
+
+    try:
+        _conn3.execute(
+            """
+            INSERT INTO knowledge_entries
+                (id, slug, version, domain, kind, title, content, status, tags,
+                 source_type, source_id, source_task_id, root_task_id, superseded_by,
+                 deprecation_reason, promoted_by, reviewed_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "knowledge-duplicate-v1",
+                "backend-jwt-schema-test",
+                1,
+                "backend",
+                "reference",
+                "JWT schema duplicate",
+                "Duplicate slug/version should fail",
+                "deprecated",
+                "[]",
+                "manual",
+                None,
+                None,
+                None,
+                None,
+                "obsolete",
+                "claude",
+                "claude",
+                _now,
+                _now,
+            ),
+        )
+    except sqlite3.IntegrityError:
+        _duplicate_version_rejected = True
+
+check("knowledge schema rejects second open entry for same slug", _second_open_rejected)
+check("knowledge schema allows historical non-open versions", _historical_version_allowed)
+check("knowledge schema rejects duplicate slug/version", _duplicate_version_rejected)
 
 # ── Domain — classify_domain ─────────────────────────────────────────────────
 print("\n[ Domain — classify_domain ]")
@@ -607,6 +1167,47 @@ check("title weight 2 vs desc weight 1", classify_domain("fix layout", "update A
 check("desc contributes to score", classify_domain("fix bug", "in the API endpoint") == "backend")
 check("tie broken by priority", classify_domain("add auth component", "") == "backend")
 check("multi-word keyword", classify_domain("configure github actions", "") == "infra")
+check("dashboard loading classifies as frontend",
+      classify_domain("Improve dashboard loading performance", "") == "frontend")
+check("dashboard load classifies as frontend",
+      classify_domain("Fix dashboard load time", "") == "frontend")
+check("dashboard + deploy stays infra",
+      classify_domain("Deploy dashboard to staging", "") == "infra")
+check("dashboard + monitoring stays infra",
+      classify_domain("Configure dashboard monitoring alerts", "") == "infra")
+check("dashboard alone is general",
+      classify_domain("Update the dashboard", "") == "general")
+check("automation domain is registered", "automation" in VALID_DOMAINS)
+check("animation classifies as frontend",
+      classify_domain("Add animation to sidebar component", "") == "frontend")
+check("accessibility classifies as frontend",
+      classify_domain("Fix accessibility issues in modal form", "") == "frontend")
+check("theme configuration in env stays infra",
+      classify_domain("Theme configuration in env", "") == "infra")
+check("boundary classifies as architecture",
+      classify_domain("Define clear boundary between payment and order modules", "") == "architecture")
+check("tradeoff classifies as architecture",
+      classify_domain("Evaluate tradeoff between monolith and microservices", "") == "architecture")
+check("auth middleware refactor stays backend",
+      classify_domain("Refactor auth middleware to reduce coupling", "") == "backend")
+check("n8n workflow classifies as automation",
+      classify_domain("Create n8n workflow for notifications", "") == "automation")
+check("cron job classifies as automation",
+      classify_domain("Set up cron job for data sync", "") == "automation")
+check("webhook integration classifies as automation",
+      classify_domain("Add webhook integration for Slack", "") == "automation")
+check("automate deploy pipeline stays infra",
+      classify_domain("Automate deploy pipeline", "") == "infra")
+check("workflow checklist stays process",
+      classify_domain("Create workflow checklist", "") == "process")
+check("sprint workflow stays process",
+      classify_domain("Review sprint workflow", "") == "process")
+check("documentation classifies as process",
+      classify_domain("Write project documentation", "") == "process")
+check("roadmap classifies as process",
+      classify_domain("Create product roadmap", "") == "process")
+check("documentation + structure stays architecture",
+      classify_domain("Improve documentation structure", "") == "architecture")
 
 # ── Domain — create_task integration ─────────────────────────────────────────
 print("\n[ Domain — create_task integration ]")
@@ -657,7 +1258,6 @@ r = submit_request(
     worker_agent="codex",
     reviewer_agent="claude",
     fallback_agent="gpt-fallback",
-    synthesizer_agent="codex",
     max_work_items=1,
 )
 check("submit_request with domain keywords succeeds", r["ok"] is True)
@@ -942,6 +1542,641 @@ check("FIFO tiebreak: older task first",
       f"got {r.get('task_id', 'none')}, expected {fifo_1_id}")
 complete_task(fifo_1_id, "backend-agent")
 complete_task(fifo_2_id, "backend-agent")  # cleanup
+
+# ── Auto-routing tests ────────────────────────────────────────────────────────
+print("\n--- Auto-routing ---")
+
+# Setup: register specialists for auto-routing tests
+# Use "automation" domain to avoid conflicts with agents registered in prior tests
+register_agent("ar-automation-worker", domains=["automation"], task_kinds=["work"])
+register_agent("ar-automation-reviewer", domains=["automation"], task_kinds=["review"])
+register_agent("ar-process-generalist", domains=["process"], task_kinds=[])
+
+# Test: worker_agent="auto" resolves to automation specialist
+r = submit_request(
+    "Create automation scripts for the deployment workflow",
+    worker_agent="auto",
+    reviewer_agent="claude",
+    planner_mode="heuristic",
+)
+check("auto-routing: worker resolved for automation domain",
+      r["ok"] is True,
+      f"submit failed: {r}")
+root_id = r["root_task_id"]
+with get_conn() as conn:
+    root_row = conn.execute("SELECT metadata FROM tasks WHERE id = ?", (root_id,)).fetchone()
+root_meta = json.loads(root_row["metadata"] or "{}")
+check("auto-routing: routing metadata present in root",
+      "routing" in root_meta,
+      f"metadata keys: {list(root_meta.keys())}")
+check("auto-routing: worker resolved to ar-automation-worker",
+      root_meta.get("worker_agent") == "ar-automation-worker",
+      f"got worker_agent={root_meta.get('worker_agent')}")
+check("auto-routing: reviewer preserved as explicit",
+      root_meta.get("reviewer_agent") == "claude",
+      f"got reviewer_agent={root_meta.get('reviewer_agent')}")
+
+# Test: routing note was appended
+notes = list_notes(task_id=root_id)
+routing_notes = [n for n in notes.get("notes", []) if n.get("author") == "hub-router"]
+check("auto-routing: routing note appended to root task",
+      len(routing_notes) >= 1,
+      f"routing notes count: {len(routing_notes)}")
+
+# Test: child work task has resolved agent as requested_agent
+work_tasks = list_tasks(root_task_id=root_id, task_kind="work")
+work_list = work_tasks.get("tasks", [])
+check("auto-routing: work task uses resolved agent",
+      len(work_list) > 0 and work_list[0].get("requested_agent") == "ar-automation-worker",
+      f"requested_agent={work_list[0].get('requested_agent') if work_list else 'no tasks'}")
+
+# Test: reviewer_agent="auto" resolves to automation reviewer
+r2 = submit_request(
+    "Automate the build automation and testing workflow",
+    worker_agent="auto",
+    reviewer_agent="auto",
+    planner_mode="heuristic",
+)
+check("auto-routing: both worker+reviewer resolved",
+      r2["ok"] is True,
+      f"submit failed: {r2}")
+root2_id = r2["root_task_id"]
+with get_conn() as conn:
+    root2_row = conn.execute("SELECT metadata FROM tasks WHERE id = ?", (root2_id,)).fetchone()
+root2_meta = json.loads(root2_row["metadata"] or "{}")
+check("auto-routing: reviewer resolved to ar-automation-reviewer",
+      root2_meta.get("reviewer_agent") == "ar-automation-reviewer",
+      f"got reviewer_agent={root2_meta.get('reviewer_agent')}")
+
+# Test: no specialist found for architecture → falls back to default
+r3 = submit_request(
+    "Design the overall system architecture for microservices",
+    worker_agent="auto",
+    reviewer_agent="auto",
+    planner_mode="heuristic",
+)
+check("auto-routing: architecture fallback to defaults",
+      r3["ok"] is True,
+      f"submit failed: {r3}")
+root3_id = r3["root_task_id"]
+with get_conn() as conn:
+    root3_row = conn.execute("SELECT metadata FROM tasks WHERE id = ?", (root3_id,)).fetchone()
+root3_meta = json.loads(root3_row["metadata"] or "{}")
+check("auto-routing: no architecture specialist → worker defaults to codex",
+      root3_meta.get("worker_agent") == "codex",
+      f"got worker_agent={root3_meta.get('worker_agent')}")
+check("auto-routing: no architecture specialist → reviewer defaults to claude",
+      root3_meta.get("reviewer_agent") == "claude",
+      f"got reviewer_agent={root3_meta.get('reviewer_agent')}")
+
+# Test: explicit agent values are NOT overridden
+r4 = submit_request(
+    "Deploy the Kubernetes cluster config",
+    worker_agent="my-custom-worker",
+    reviewer_agent="my-custom-reviewer",
+    planner_mode="heuristic",
+)
+check("auto-routing: explicit agents preserved (no auto)",
+      r4["ok"] is True,
+      f"submit failed: {r4}")
+root4_id = r4["root_task_id"]
+with get_conn() as conn:
+    root4_row = conn.execute("SELECT metadata FROM tasks WHERE id = ?", (root4_id,)).fetchone()
+root4_meta = json.loads(root4_row["metadata"] or "{}")
+check("auto-routing: explicit worker preserved",
+      root4_meta.get("worker_agent") == "my-custom-worker",
+      f"got worker_agent={root4_meta.get('worker_agent')}")
+check("auto-routing: no routing metadata when no auto sentinel",
+      "routing" not in root4_meta,
+      f"metadata keys: {list(root4_meta.keys())}")
+
+# Test: explicit empty strings still preserve legacy defaults
+r_empty = submit_request(
+    "Fix API auth endpoint",
+    worker_agent="",
+    reviewer_agent="",
+    planner_mode="heuristic",
+)
+check("auto-routing: empty strings preserve legacy defaults",
+      r_empty["ok"] is True,
+      f"submit failed: {r_empty}")
+root_empty_id = r_empty["root_task_id"]
+with get_conn() as conn:
+    root_empty_row = conn.execute("SELECT metadata FROM tasks WHERE id = ?", (root_empty_id,)).fetchone()
+root_empty_meta = json.loads(root_empty_row["metadata"] or "{}")
+check("auto-routing: empty worker defaults to codex",
+      root_empty_meta.get("worker_agent") == "codex",
+      f"got worker_agent={root_empty_meta.get('worker_agent')}")
+check("auto-routing: empty reviewer defaults to claude",
+      root_empty_meta.get("reviewer_agent") == "claude",
+      f"got reviewer_agent={root_empty_meta.get('reviewer_agent')}")
+check("auto-routing: empty strings do not emit routing metadata",
+      "routing" not in root_empty_meta,
+      f"metadata keys: {list(root_empty_meta.keys())}")
+empty_tree = list_task_tree(root_empty_id)
+empty_kinds = [node.get("task_kind") for node in empty_tree.get("tasks", [])]
+check("auto-routing: empty strings still create review task",
+      "review" in empty_kinds,
+      f"task kinds: {empty_kinds}")
+
+# Test: process generalist (empty task_kinds) matches both work and review
+r5 = submit_request(
+    "Define the sprint process and standup workflow",
+    worker_agent="auto",
+    reviewer_agent="auto",
+    planner_mode="heuristic",
+)
+check("auto-routing: process domain resolves",
+      r5["ok"] is True,
+      f"submit failed: {r5}")
+root5_id = r5["root_task_id"]
+with get_conn() as conn:
+    root5_row = conn.execute("SELECT metadata FROM tasks WHERE id = ?", (root5_id,)).fetchone()
+root5_meta = json.loads(root5_row["metadata"] or "{}")
+check("auto-routing: process generalist resolves for worker",
+      root5_meta.get("worker_agent") == "ar-process-generalist",
+      f"got worker_agent={root5_meta.get('worker_agent')}")
+check("auto-routing: process generalist resolves for reviewer",
+      root5_meta.get("reviewer_agent") == "ar-process-generalist",
+      f"got reviewer_agent={root5_meta.get('reviewer_agent')}")
+
+# Test: routing detail shows method for each role
+routing_info = root_meta.get("routing", {})
+routing_detail = routing_info.get("routing", {})
+check("auto-routing: routing detail tracks specialist method",
+      routing_detail.get("worker_agent", {}).get("method") == "specialist",
+      f"routing detail: {routing_detail.get('worker_agent', {})}")
+check("auto-routing: routing detail tracks explicit method",
+      routing_detail.get("reviewer_agent", {}).get("method") == "explicit",
+      f"routing detail: {routing_detail.get('reviewer_agent', {})}")
+
+from tools.orchestration import _find_specialist
+
+with get_conn() as conn:
+    _frontend_rows = conn.execute("SELECT agent_name, active, domains FROM agent_profiles").fetchall()
+_frontend_states = []
+for row in _frontend_rows:
+    domains = json.loads(row["domains"] or "[]")
+    if "frontend" in domains:
+        _frontend_states.append((row["agent_name"], row["active"]))
+
+with get_conn() as conn:
+    for agent_name, _active in _frontend_states:
+        conn.execute("UPDATE agent_profiles SET active = 0 WHERE agent_name = ?", (agent_name,))
+
+register_agent("test-fe-specialist-work", domains=["frontend"], task_kinds=["work"])
+register_agent("test-fe-specialist-review", domains=["frontend"], task_kinds=["review"])
+with get_conn() as conn:
+    _frontend_work_specialist = _find_specialist(conn, "frontend", "work")
+    _frontend_review_specialist = _find_specialist(conn, "frontend", "review")
+check("auto-routing: isolated frontend worker specialist resolves",
+      _frontend_work_specialist == "test-fe-specialist-work",
+      f"got {_frontend_work_specialist}")
+check("auto-routing: isolated frontend reviewer specialist resolves",
+      _frontend_review_specialist == "test-fe-specialist-review",
+      f"got {_frontend_review_specialist}")
+
+register_agent("test-fe-specialist-work", domains=["frontend"], task_kinds=["work"], active=0)
+register_agent("test-fe-specialist-review", domains=["frontend"], task_kinds=["review"], active=0)
+with get_conn() as conn:
+    for agent_name, active in _frontend_states:
+        conn.execute("UPDATE agent_profiles SET active = ? WHERE agent_name = ?", (active, agent_name))
+
+register_agent("test-arch-specialist-work", domains=["architecture"], task_kinds=["work"])
+register_agent("test-arch-specialist-review", domains=["architecture"], task_kinds=["review"])
+with get_conn() as conn:
+    _architecture_work_specialist = _find_specialist(conn, "architecture", "work")
+    _architecture_review_specialist = _find_specialist(conn, "architecture", "review")
+check("auto-routing: isolated architecture worker specialist resolves",
+      _architecture_work_specialist == "test-arch-specialist-work",
+      f"got {_architecture_work_specialist}")
+check("auto-routing: isolated architecture reviewer specialist resolves",
+      _architecture_review_specialist == "test-arch-specialist-review",
+      f"got {_architecture_review_specialist}")
+register_agent("test-arch-specialist-work", domains=["architecture"], task_kinds=["work"], active=0)
+register_agent("test-arch-specialist-review", domains=["architecture"], task_kinds=["review"], active=0)
+
+with get_conn() as conn:
+    _process_rows = conn.execute("SELECT agent_name, active, domains FROM agent_profiles").fetchall()
+_process_states = []
+for row in _process_rows:
+    domains = json.loads(row["domains"] or "[]")
+    if "process" in domains:
+        _process_states.append((row["agent_name"], row["active"]))
+
+with get_conn() as conn:
+    for agent_name, _active in _process_states:
+        conn.execute("UPDATE agent_profiles SET active = 0 WHERE agent_name = ?", (agent_name,))
+
+register_agent("test-proc-specialist-work", domains=["process"], task_kinds=["work"])
+register_agent("test-proc-specialist-review", domains=["process"], task_kinds=["review"])
+with get_conn() as conn:
+    _process_work_specialist = _find_specialist(conn, "process", "work")
+    _process_review_specialist = _find_specialist(conn, "process", "review")
+check("auto-routing: isolated process worker specialist resolves",
+      _process_work_specialist == "test-proc-specialist-work",
+      f"got {_process_work_specialist}")
+check("auto-routing: isolated process reviewer specialist resolves",
+      _process_review_specialist == "test-proc-specialist-review",
+      f"got {_process_review_specialist}")
+register_agent("test-proc-specialist-work", domains=["process"], task_kinds=["work"], active=0)
+register_agent("test-proc-specialist-review", domains=["process"], task_kinds=["review"], active=0)
+with get_conn() as conn:
+    for agent_name, active in _process_states:
+        conn.execute("UPDATE agent_profiles SET active = ? WHERE agent_name = ?", (active, agent_name))
+
+# ── Checklist Enforcement ─────────────────────────────────────────────────────
+print("\n[ Checklist Enforcement — migration ]")
+
+# Test 1: enforcement column exists after ensure_ready
+with get_conn() as _conn_enf:
+    _pb_cols = {row["name"] for row in _conn_enf.execute("PRAGMA table_info(playbooks)").fetchall()}
+check("enforcement column exists in playbooks", "enforcement" in _pb_cols)
+
+# Test 2: work/automation has enforcement='required' (set by migration or seed)
+with get_conn() as _conn_enf:
+    _auto_pb = _conn_enf.execute(
+        "SELECT enforcement FROM playbooks WHERE task_kind = 'work' AND domain = 'automation' AND active = 1 "
+        "ORDER BY version DESC LIMIT 1"
+    ).fetchone()
+check("work/automation enforcement is required",
+      _auto_pb is not None and _auto_pb["enforcement"] == "required",
+      f"got: {_auto_pb['enforcement'] if _auto_pb else 'no playbook'}")
+
+# Test 3: second ensure_ready does NOT reimpose enforcement
+# Manually set work/automation to advisory, then call ensure_ready again
+with get_conn() as _conn_enf:
+    _conn_enf.execute(
+        "UPDATE playbooks SET enforcement = 'advisory' WHERE task_kind = 'work' AND domain = 'automation'"
+    )
+ensure_ready()
+with get_conn() as _conn_enf:
+    _auto_pb2 = _conn_enf.execute(
+        "SELECT enforcement FROM playbooks WHERE task_kind = 'work' AND domain = 'automation' AND active = 1 "
+        "ORDER BY version DESC LIMIT 1"
+    ).fetchone()
+check("second ensure_ready does not reimpose enforcement",
+      _auto_pb2 is not None and _auto_pb2["enforcement"] == "advisory",
+      f"got: {_auto_pb2['enforcement'] if _auto_pb2 else 'no playbook'}")
+
+# Test 4: rollback manual to advisory persists after new ensure_ready
+# (already proven by test 3 — advisory persisted)
+ensure_ready()
+with get_conn() as _conn_enf:
+    _auto_pb3 = _conn_enf.execute(
+        "SELECT enforcement FROM playbooks WHERE task_kind = 'work' AND domain = 'automation' AND active = 1 "
+        "ORDER BY version DESC LIMIT 1"
+    ).fetchone()
+check("rollback to advisory persists after ensure_ready",
+      _auto_pb3 is not None and _auto_pb3["enforcement"] == "advisory",
+      f"got: {_auto_pb3['enforcement'] if _auto_pb3 else 'no playbook'}")
+
+# Restore enforcement='required' for gate tests
+with get_conn() as _conn_enf:
+    _conn_enf.execute(
+        "UPDATE playbooks SET enforcement = 'required' WHERE task_kind = 'work' AND domain = 'automation'"
+    )
+
+# Test 5: banco novo nasce com work/automation=required
+# Already tested by test 2 (seed includes enforcement='required').
+# Additional check: get_playbook exposes enforcement field
+r = get_playbook("work", "automation")
+check("get_playbook exposes enforcement field",
+      r["ok"] is True and r["playbook"].get("enforcement") == "required",
+      f"got: {r['playbook'].get('enforcement') if r.get('playbook') else 'no playbook'}")
+
+print("\n[ Checklist Enforcement — gate ]")
+
+# Test 6: gate blocks complete_task when checklist is absent
+_enf_task = create_task("Build n8n automation workflow", owner="enf-agent", domain="automation", task_kind="work")
+_enf_id = _enf_task["task_id"]
+claim_task(_enf_id, "enf-agent")
+r = complete_task(_enf_id, "enf-agent")
+check("gate blocks complete_task for missing checklist",
+      r["ok"] is False and "no checklist validation found" in r.get("error", ""),
+      f"got: {r}")
+
+# Verify gate note was appended
+_enf_notes = list_notes(task_id=_enf_id)
+_gate_notes = [n for n in _enf_notes.get("notes", []) if "[CHECKLIST GATE] blocked" in n.get("content", "")]
+check("gate note appended on block",
+      len(_gate_notes) >= 1,
+      f"gate notes: {len(_gate_notes)}")
+
+# Test 7: gate blocks when score < 1.0
+_partial_responses = [
+    {"item": "Artifact publicado?", "passed": True},
+    {"item": "Credenciais seguras?", "passed": True},
+    {"item": "Rollback plan?", "passed": False},
+    {"item": "Staging testado?", "passed": True},
+]
+validate_checklist(task_id=_enf_id, responses=_partial_responses, validator="enf-agent")
+r = complete_task(_enf_id, "enf-agent")
+check("gate blocks complete_task for score < 1.0",
+      r["ok"] is False and "score" in r.get("error", "") and "< 1.0" in r.get("error", ""),
+      f"got: {r}")
+
+# Test 8: gate passes with score 1.0
+_full_responses = [
+    {"item": "Artifact publicado?", "passed": True},
+    {"item": "Credenciais seguras?", "passed": True},
+    {"item": "Rollback plan?", "passed": True},
+    {"item": "Staging testado?", "passed": True},
+]
+validate_checklist(task_id=_enf_id, responses=_full_responses, validator="enf-agent")
+r = complete_task(_enf_id, "enf-agent")
+check("gate passes with score 1.0",
+      r["ok"] is True and r.get("status") == "done",
+      f"got: {r}")
+
+# Test 9: latest checklist result wins over older better score
+_latest_task = create_task("Build another n8n automation workflow", owner="latest-agent", domain="automation", task_kind="work")
+_latest_id = _latest_task["task_id"]
+claim_task(_latest_id, "latest-agent")
+validate_checklist(task_id=_latest_id, responses=_full_responses, validator="latest-agent")
+validate_checklist(task_id=_latest_id, responses=_partial_responses, validator="latest-agent")
+r = complete_task(_latest_id, "latest-agent")
+check("latest checklist result overrides older perfect score",
+      r["ok"] is False and "score 0.75 < 1.0" in r.get("error", ""),
+      f"got: {r}")
+
+# Test 10: backend/advisory (enforcement=advisory) does NOT block
+_adv_task = create_task("Fix server middleware for backend auth", owner="adv-agent", domain="backend", task_kind="work")
+_adv_id = _adv_task["task_id"]
+claim_task(_adv_id, "adv-agent")
+# Complete without any checklist — should pass because backend/work playbook is advisory
+r = complete_task(_adv_id, "adv-agent")
+check("advisory playbook does not block completion",
+      r["ok"] is True and r.get("status") == "done",
+      f"got: {r}")
+
+# Test 11: frontend/work is advisory and does NOT block completion
+_fe_adv_task = create_task("Build responsive sidebar component", owner="fe-adv-agent", domain="frontend", task_kind="work")
+_fe_adv_id = _fe_adv_task["task_id"]
+claim_task(_fe_adv_id, "fe-adv-agent")
+validate_checklist(
+    task_id=_fe_adv_id,
+    responses=[
+        {"item": "Componente renderiza sem erros no console?", "passed": True},
+        {"item": "ui-evidence publicado?", "passed": False},
+        {"item": "Acessibilidade basica respeitada?", "passed": True},
+        {"item": "Artifact de codigo publicado?", "passed": True},
+    ],
+    validator="fe-adv-agent",
+)
+r = complete_task(_fe_adv_id, "fe-adv-agent")
+check("frontend advisory playbook does not block completion",
+      r["ok"] is True and r.get("status") == "done",
+      f"got: {r}")
+
+# Test 12: architecture/work is advisory and does NOT block completion
+_arch_adv_task = create_task("Evaluate module boundaries for service separation", owner="arch-adv-agent", domain="architecture", task_kind="work")
+_arch_adv_id = _arch_adv_task["task_id"]
+claim_task(_arch_adv_id, "arch-adv-agent")
+validate_checklist(
+    task_id=_arch_adv_id,
+    responses=[
+        {"item": "arch-decision publicado?", "passed": True},
+        {"item": "Alternativas consideradas?", "passed": True},
+        {"item": "record_decision com source/root?", "passed": False},
+        {"item": "Impacto em boundaries avaliado?", "passed": True},
+    ],
+    validator="arch-adv-agent",
+)
+r = complete_task(_arch_adv_id, "arch-adv-agent")
+check("architecture advisory playbook does not block completion",
+      r["ok"] is True and r.get("status") == "done",
+      f"got: {r}")
+
+# Test 13: task with no matching playbook at all → no gate
+_no_pb_task = create_task("Do rework for something", owner="rw-agent", domain="automation", task_kind="rework")
+_no_pb_id = _no_pb_task["task_id"]
+claim_task(_no_pb_id, "rw-agent")
+r = complete_task(_no_pb_id, "rw-agent")
+check("no playbook → no gate (rework/automation)",
+      r["ok"] is True and r.get("status") == "done",
+      f"got: {r}")
+
+# ── Retrospective On-Demand ───────────────────────────────────────────────────
+print("\n[ Retrospective On-Demand ]")
+
+# Setup: create a small completed request tree for retrospective tests
+_retro_root = create_task("Retro test request", task_kind="request", domain="automation")
+_retro_root_id = _retro_root["task_id"]
+
+_retro_work = create_task(
+    "Retro work task", owner="retro-worker", task_kind="work", domain="automation",
+    parent_task_id=_retro_root_id, root_task_id=_retro_root_id,
+)
+_retro_work_id = _retro_work["task_id"]
+
+_retro_review = create_task(
+    "Retro review task", owner="retro-reviewer", task_kind="review", domain="automation",
+    parent_task_id=_retro_root_id, root_task_id=_retro_root_id,
+    depends_on=[_retro_work_id],
+)
+_retro_review_id = _retro_review["task_id"]
+
+# Add a gate block note to the work task for bottleneck detection
+append_note(
+    "[CHECKLIST GATE] blocked | reason=no checklist validation found | task_kind=work | domain=automation",
+    task_id=_retro_work_id, author="checklist-gate",
+)
+
+# Validate checklist with score 1.0 so the gate passes
+validate_checklist(_retro_work_id, [
+    {"item": "Test item 1", "passed": True},
+    {"item": "Test item 2", "passed": True},
+], validator="retro-validator")
+
+# Complete operational tasks only. The root request remains pending by design;
+# retrospective generation should still succeed once work/review are final.
+claim_task(_retro_work_id, "retro-worker")
+complete_task(_retro_work_id, "retro-worker")
+claim_task(_retro_review_id, "retro-reviewer")
+complete_task(_retro_review_id, "retro-reviewer")
+
+# Test 1: generate_retrospective succeeds when only operational tasks are final
+r = generate_retrospective(_retro_root_id, generated_by="test-runner")
+check("generate_retrospective returns ok",
+      r["ok"] is True and r.get("already_exists") is False,
+      f"got: ok={r.get('ok')}, already_exists={r.get('already_exists')}")
+_retro_id = r.get("retrospective_id", "")
+
+# Test 2: retrospective has correct root_task_id
+check("retrospective has correct root_task_id",
+      r.get("root_task_id") == _retro_root_id)
+
+# Test 3: summary has expected fields
+_summary = r.get("retrospective", {}).get("summary", {})
+check("summary contains total_tasks",
+      isinstance(_summary.get("total_tasks"), int) and _summary["total_tasks"] == 3,
+      f"total_tasks={_summary.get('total_tasks')}")
+
+# Test 4: outcome is all_done even if root request remains pending
+check("outcome is all_done",
+      _summary.get("outcome") == "all_done",
+      f"outcome={_summary.get('outcome')}")
+
+# Test 5: root pending does not block clean outcome reporting
+_tasks_by_status = _summary.get("tasks_by_status", {})
+check("root request can remain pending without blocking retrospective",
+      _tasks_by_status.get("pending", 0) == 1 and _summary.get("outcome") == "all_done",
+      f"tasks_by_status={_tasks_by_status}, outcome={_summary.get('outcome')}")
+
+# Test 6: gate_blocks detected
+check("gate_blocks count is 1",
+      _summary.get("gate_blocks") == 1,
+      f"gate_blocks={_summary.get('gate_blocks')}")
+
+# Test 7: review_rounds derived from task_kind=review count
+check("review_rounds is 1",
+      _summary.get("review_rounds") == 1,
+      f"review_rounds={_summary.get('review_rounds')}")
+
+# Test 8: bottlenecks populated
+_bottlenecks = r.get("retrospective", {}).get("bottlenecks", [])
+check("bottlenecks mentions gate block",
+      any("gate" in b for b in _bottlenecks),
+      f"bottlenecks={_bottlenecks}")
+
+# Test 9: domain is set
+check("retrospective domain is automation",
+      r.get("retrospective", {}).get("domain") == "automation")
+
+# Test 10: immutability — second call returns already_exists=True
+r2 = generate_retrospective(_retro_root_id, generated_by="test-runner-2")
+check("second generate returns already_exists=True",
+      r2["ok"] is True and r2.get("already_exists") is True,
+      f"already_exists={r2.get('already_exists')}")
+
+# Test 11: immutability — same retrospective_id returned
+check("immutable: same retrospective_id",
+      r2.get("retrospective_id") == _retro_id)
+
+# Test 12: get_retrospective reads back correctly
+r3 = get_retrospective(_retro_root_id)
+check("get_retrospective returns ok",
+      r3["ok"] is True,
+      f"ok={r3.get('ok')}")
+
+# Test 13: get_retrospective has matching summary
+_get_summary = r3.get("retrospective", {}).get("summary", {})
+check("get_retrospective summary matches generate",
+      _get_summary.get("total_tasks") == 3 and _get_summary.get("outcome") == "all_done")
+
+# Test 14: get_retrospective for nonexistent root returns error
+r4 = get_retrospective("nonexistent-root-id-12345")
+check("get_retrospective nonexistent returns error",
+      r4["ok"] is False and "no retrospective found" in r4.get("error", ""),
+      f"error={r4.get('error')}")
+
+# Test 15: generate_retrospective blocks on non-final operational tasks
+_open_root = create_task("Open retro test", task_kind="request", domain="backend")
+_open_root_id = _open_root["task_id"]
+_open_work = create_task("Open work", task_kind="work", domain="backend",
+                         parent_task_id=_open_root_id, root_task_id=_open_root_id)
+r5 = generate_retrospective(_open_root_id)
+check("generate blocks when tasks not in final state",
+      r5["ok"] is False and "not in final state" in r5.get("error", ""),
+      f"error={r5.get('error')}")
+
+# Test 16: generate_retrospective blocks root-only requests with no operational tasks
+_root_only = create_task("Root only retro test", task_kind="request", domain="backend")
+r6 = generate_retrospective(_root_only["task_id"])
+check("generate blocks root-only request with no operational tasks",
+      r6["ok"] is False and "no operational tasks" in r6.get("error", ""),
+      f"error={r6.get('error')}")
+
+# Test 17: generate_retrospective with empty root_task_id
+r7 = generate_retrospective("")
+check("generate with empty root_task_id returns error",
+      r7["ok"] is False and "required" in r7.get("error", ""),
+      f"error={r7.get('error')}")
+
+# Test 18: UNIQUE index exists on retrospectives(root_task_id)
+with get_conn() as _retro_conn:
+    _idx_rows = _retro_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='retrospectives' AND name LIKE '%root%'"
+    ).fetchall()
+    _idx_names = [row["name"] for row in _idx_rows]
+check("UNIQUE index idx_retrospectives_root exists",
+      "idx_retrospectives_root" in _idx_names,
+      f"indexes={_idx_names}")
+
+# ── CLI — Knowledge Layer ─────────────────────────────────────────────────────
+print("\n[ CLI — knowledge ]")
+
+_cli_exit, _cli_query, _cli_raw = run_cli(["query-knowledge", "--slug", "backend-neon-guideline"])
+check("CLI query-knowledge returns active entry by slug",
+      _cli_exit == 0 and _cli_query["ok"] is True and _cli_query["count"] == 1,
+      _cli_raw)
+
+_cli_submit_exit, _cli_submit, _cli_submit_raw = run_cli([
+    "submit",
+    "Document the JWT auth flow",
+    "--planner-mode", "heuristic",
+])
+check("CLI submit uses codex-general as default synthesizer",
+      _cli_submit_exit == 0 and _cli_submit["ok"] is True,
+      _cli_submit_raw)
+_cli_tree = list_task_tree(_cli_submit["root_task_id"])
+_cli_synth = first_task(_cli_tree.get("tasks", []), "synthesize")
+check("CLI submit default synth task targets codex-general",
+      _cli_synth is not None and _cli_synth.get("requested_agent") == "codex-general",
+      f"requested_agent={_cli_synth.get('requested_agent') if _cli_synth else 'missing'}")
+
+_cli_slug = "cli-knowledge-guideline"
+_cli_exit, _cli_promote, _cli_raw = run_cli([
+    "promote-knowledge",
+    _cli_slug,
+    "general",
+    "guideline",
+    "CLI knowledge guideline",
+    "Use hub_cli for curated knowledge operations.",
+    "manual",
+    "codex-general",
+    "--tags", "cli", "knowledge",
+])
+check("CLI promote-knowledge creates a draft",
+      _cli_exit == 0 and _cli_promote["ok"] is True and _cli_promote["status"] == "draft",
+      _cli_raw)
+_cli_knowledge_v1 = _cli_promote["knowledge_id"]
+
+_cli_exit, _cli_approve, _cli_raw = run_cli(["approve-knowledge", _cli_knowledge_v1, "claude"])
+check("CLI approve-knowledge activates the draft",
+      _cli_exit == 0 and _cli_approve["ok"] is True and _cli_approve["status"] == "active",
+      _cli_raw)
+
+_cli_exit, _cli_supersede, _cli_raw = run_cli([
+    "supersede-knowledge",
+    _cli_knowledge_v1,
+    "codex-general",
+    "--new-content", "Use hub_cli for curated knowledge operations with v2 guidance.",
+])
+check("CLI supersede-knowledge creates a new active version",
+      _cli_exit == 0 and _cli_supersede["ok"] is True and _cli_supersede["new_version"] == 2,
+      _cli_raw)
+_cli_knowledge_v2 = _cli_supersede["new_id"]
+
+_cli_exit, _cli_deprecate, _cli_raw = run_cli([
+    "deprecate-knowledge",
+    _cli_knowledge_v2,
+    "claude",
+    "Superseded during CLI smoke validation",
+])
+check("CLI deprecate-knowledge marks the entry deprecated",
+      _cli_exit == 0 and _cli_deprecate["ok"] is True and _cli_deprecate["status"] == "deprecated",
+      _cli_raw)
+
+_cli_exit, _cli_query_deprecated, _cli_raw = run_cli([
+    "query-knowledge",
+    "--slug", _cli_slug,
+    "--status", "deprecated",
+])
+check("CLI query-knowledge can read deprecated entries explicitly",
+      _cli_exit == 0 and _cli_query_deprecated["ok"] is True and _cli_query_deprecated["count"] == 1,
+      _cli_raw)
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 passed = sum(_results)
