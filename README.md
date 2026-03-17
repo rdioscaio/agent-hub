@@ -69,7 +69,7 @@ Or add it to your shell profile (`~/.bashrc`, `~/.zshrc`).
 
 ```bash
 cd /home/rdios/agent-hub-mcp
-python3 -c "from hub.db import init_db; init_db(); print('DB ready')"
+python3 -c "from hub.bootstrap import ensure_ready; ensure_ready(); print('Hub ready')"
 ```
 
 ### 4. Verify the server lists tools
@@ -79,12 +79,16 @@ cd /home/rdios/agent-hub-mcp
 fastmcp list server.py
 ```
 
-Expected output now includes 20 tools:
+Expected output now includes 37 tools:
 
 `create_task, get_task, claim_task, claim_next_task, heartbeat_task, complete_task,`
 `fail_task, list_tasks, append_note, list_notes, publish_artifact, read_artifact,`
 `acquire_lock, release_lock, ask_gpt, delegate_task_to_gpt, submit_request,`
-`record_review, list_task_tree, summarize_request`
+`record_review, list_task_tree, summarize_request, store_memory, recall_memory,`
+`record_decision, query_decisions, promote_knowledge, approve_knowledge,`
+`supersede_knowledge, deprecate_knowledge, query_knowledge, get_playbook,`
+`validate_checklist, get_metrics, register_agent, get_agent_profile, list_agents,`
+`generate_retrospective, get_retrospective`
 
 ---
 
@@ -126,6 +130,13 @@ python3 hub_cli.py claim-next codex
 
 # Summarize progress for a root request
 python3 hub_cli.py status <root_task_id>
+
+# Query active curated knowledge
+python3 hub_cli.py query-knowledge --domain frontend --kind guideline
+
+# Promote and approve curated knowledge from the terminal
+python3 hub_cli.py promote-knowledge my-slug general guideline "Title" "Content" manual codex-general
+python3 hub_cli.py approve-knowledge <knowledge_id> claude
 
 # Record a review and trigger fallback if needed
 python3 hub_cli.py review <task_id> claude fallback --feedback "Need a stronger second pass"
@@ -217,6 +228,38 @@ Codex:
 | `record_review` | Record approval, revision request, or fallback request and create follow-up tasks |
 | `list_task_tree` | Flatten a request tree with depth annotations |
 | `summarize_request` | Return progress summary and currently ready tasks |
+
+### Memory and knowledge tools
+
+| Tool | Description |
+|---|---|
+| `store_memory` | Persist operational facts, patterns, or limitations |
+| `recall_memory` | Read operational memory by domain/tags/confidence |
+| `record_decision` | Store a structured decision with rationale and alternatives |
+| `query_decisions` | Search historical decisions by domain/keyword |
+| `promote_knowledge` | Create a curated draft from memory, decision, or manual input |
+| `approve_knowledge` | Approve a draft and mark it active |
+| `supersede_knowledge` | Replace an active knowledge entry with a new active version |
+| `deprecate_knowledge` | Mark a draft/active knowledge entry deprecated |
+| `query_knowledge` | Query curated knowledge; default returns only active entries |
+
+### Retrospective tools
+
+| Tool | Description |
+|---|---|
+| `generate_retrospective` | Persist a deterministic retrospective snapshot for a completed request tree |
+| `get_retrospective` | Read a persisted retrospective by `root_task_id` |
+
+### Advisory and observability tools
+
+| Tool | Description |
+|---|---|
+| `get_playbook` | Return the advisory playbook for a task kind/domain |
+| `validate_checklist` | Record checklist scoring as an advisory note |
+| `get_metrics` | Query passive performance metrics and aggregates |
+| `register_agent` | Upsert an agent capability profile |
+| `get_agent_profile` | Read one agent profile |
+| `list_agents` | List active/inactive agent profiles, optionally by domain |
 
 ---
 
