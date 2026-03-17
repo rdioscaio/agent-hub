@@ -10,7 +10,10 @@ Tools exposed:
   Delegate : ask_gpt, delegate_task_to_gpt
   Orchestr.: submit_request, record_review, list_task_tree, summarize_request
   Memory   : store_memory, recall_memory, record_decision, query_decisions
+  Knowledge: promote_knowledge, approve_knowledge, supersede_knowledge,
+             deprecate_knowledge, query_knowledge
   Playbooks: get_playbook, validate_checklist
+  Retros   : generate_retrospective, get_retrospective
   Metrics  : get_metrics
   Agents   : register_agent, get_agent_profile, list_agents
 """
@@ -26,11 +29,19 @@ from fastmcp import FastMCP
 from tools.agents import get_agent_profile, list_agents, register_agent
 from tools.artifacts import publish_artifact, read_artifact
 from tools.ask_gpt import ask_gpt
+from tools.knowledge import (
+    approve_knowledge,
+    deprecate_knowledge,
+    promote_knowledge,
+    query_knowledge,
+    supersede_knowledge,
+)
 from tools.locks import acquire_lock, release_lock
 from tools.memory import query_decisions, recall_memory, record_decision, store_memory
 from tools.metrics import get_metrics
 from tools.notes import append_note, list_notes
 from tools.playbooks import get_playbook, validate_checklist
+from tools.retrospectives import generate_retrospective, get_retrospective
 from tools.orchestration import (
     delegate_task_to_gpt,
     list_task_tree,
@@ -83,9 +94,20 @@ mcp.tool()(recall_memory)
 mcp.tool()(record_decision)
 mcp.tool()(query_decisions)
 
+# --- Knowledge ---
+mcp.tool()(promote_knowledge)
+mcp.tool()(approve_knowledge)
+mcp.tool()(supersede_knowledge)
+mcp.tool()(deprecate_knowledge)
+mcp.tool()(query_knowledge)
+
 # --- Playbooks ---
 mcp.tool()(get_playbook)
 mcp.tool()(validate_checklist)
+
+# --- Retrospectives ---
+mcp.tool()(generate_retrospective)
+mcp.tool()(get_retrospective)
 
 # --- Metrics ---
 mcp.tool()(get_metrics)

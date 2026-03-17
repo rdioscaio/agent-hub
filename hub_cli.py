@@ -8,8 +8,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from hub.db import init_db
+from hub.bootstrap import ensure_ready
 from tools.artifacts import publish_artifact
+from tools.knowledge import (
+    approve_knowledge,
+    deprecate_knowledge,
+    promote_knowledge,
+    query_knowledge,
+    supersede_knowledge,
+)
 from tools.notes import append_note
 from tools.orchestration import (
     delegate_task_to_gpt,
@@ -39,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--worker-agent", default="codex")
     submit.add_argument("--reviewer-agent", default="claude")
     submit.add_argument("--fallback-agent", default="gpt-fallback")
-    submit.add_argument("--synthesizer-agent", default="codex")
+    submit.add_argument("--synthesizer-agent", default="codex-general")
     submit.add_argument("--max-work-items", type=int, default=3)
 
     claim_next = sub.add_parser("claim-next", help="claim the next runnable task")
@@ -88,11 +95,50 @@ def build_parser() -> argparse.ArgumentParser:
     artifact.add_argument("content")
     artifact.add_argument("--content-type", default="text/plain")
 
+    query_k = sub.add_parser("query-knowledge", help="query curated knowledge entries")
+    query_k.add_argument("--domain", default="")
+    query_k.add_argument("--kind", default="")
+    query_k.add_argument("--status", default="active")
+    query_k.add_argument("--keyword", default="")
+    query_k.add_argument("--slug", default="")
+    query_k.add_argument("--limit", type=int, default=10)
+    query_k.add_argument("--tags", nargs="*", default=None)
+
+    promote_k = sub.add_parser("promote-knowledge", help="create a draft knowledge entry")
+    promote_k.add_argument("slug")
+    promote_k.add_argument("domain")
+    promote_k.add_argument("kind")
+    promote_k.add_argument("title")
+    promote_k.add_argument("content")
+    promote_k.add_argument("source_type", choices=["memory", "decision", "manual"])
+    promote_k.add_argument("promoted_by")
+    promote_k.add_argument("--source-id", default="")
+    promote_k.add_argument("--source-task-id", default="")
+    promote_k.add_argument("--root-task-id", default="")
+    promote_k.add_argument("--tags", nargs="*", default=None)
+
+    approve_k = sub.add_parser("approve-knowledge", help="approve a draft knowledge entry")
+    approve_k.add_argument("knowledge_id")
+    approve_k.add_argument("reviewed_by")
+
+    supersede_k = sub.add_parser("supersede-knowledge", help="supersede an active knowledge entry")
+    supersede_k.add_argument("knowledge_id")
+    supersede_k.add_argument("updated_by")
+    supersede_k.add_argument("--new-title", default="")
+    supersede_k.add_argument("--new-content", default="")
+    supersede_k.add_argument("--domain", default="")
+    supersede_k.add_argument("--tags", nargs="*", default=None)
+
+    deprecate_k = sub.add_parser("deprecate-knowledge", help="deprecate a draft or active knowledge entry")
+    deprecate_k.add_argument("knowledge_id")
+    deprecate_k.add_argument("deprecated_by")
+    deprecate_k.add_argument("reason")
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    init_db()
+    ensure_ready()
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -169,6 +215,54 @@ def main(argv: list[str] | None = None) -> int:
                 content_type=args.content_type,
             )
         )
+
+    if args.command == "query-knowledge":
+        return _print(
+            query_knowledge(
+                domain=args.domain,
+                kind=args.kind,
+                status=args.status,
+                keyword=args.keyword,
+                tags=args.tags,
+                slug=args.slug,
+                limit=args.limit,
+            )
+        )
+
+    if args.command == "promote-knowledge":
+        return _print(
+            promote_knowledge(
+                slug=args.slug,
+                domain=args.domain,
+                kind=args.kind,
+                title=args.title,
+                content=args.content,
+                source_type=args.source_type,
+                promoted_by=args.promoted_by,
+                source_id=args.source_id,
+                source_task_id=args.source_task_id,
+                root_task_id=args.root_task_id,
+                tags=args.tags,
+            )
+        )
+
+    if args.command == "approve-knowledge":
+        return _print(approve_knowledge(args.knowledge_id, args.reviewed_by))
+
+    if args.command == "supersede-knowledge":
+        return _print(
+            supersede_knowledge(
+                knowledge_id=args.knowledge_id,
+                updated_by=args.updated_by,
+                new_title=args.new_title,
+                new_content=args.new_content,
+                domain=args.domain,
+                tags=args.tags,
+            )
+        )
+
+    if args.command == "deprecate-knowledge":
+        return _print(deprecate_knowledge(args.knowledge_id, args.deprecated_by, args.reason))
 
     parser.error(f"unsupported command {args.command}")
     return 2

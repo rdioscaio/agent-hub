@@ -20,6 +20,12 @@ import uuid
 
 from hub.audit import audit
 from hub.db import get_conn
+from hub.domain import VALID_DOMAINS
+
+
+_DOMAIN_ALIASES = {
+    "arch": "architecture",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +75,12 @@ def _require(fields: dict[str, str]) -> dict | None:
     return None
 
 
+def _normalize_domain(domain: str) -> str:
+    """Normalize legacy domain aliases to the canonical VALID_DOMAINS values."""
+    cleaned = str(domain or "").strip().lower()
+    return _DOMAIN_ALIASES.get(cleaned, cleaned)
+
+
 # ---------------------------------------------------------------------------
 # store_memory
 # ---------------------------------------------------------------------------
@@ -85,7 +97,8 @@ def store_memory(
     """Store a memory entry (fact, pattern, convention, limitation).
 
     Args:
-        domain:         Required. Category: 'backend', 'frontend', 'infra', 'arch', 'process'.
+        domain:         Required. Category: 'backend', 'frontend', 'database',
+                        'infra', 'architecture', 'process', 'general'.
         content:        Required. The knowledge to persist.
         author:         Required. Who is recording this memory.
         tags:           Optional. List of keyword tags for filtering.
@@ -107,6 +120,10 @@ def store_memory(
         error = _require({"domain": domain, "content": content, "author": author})
         if error:
             return error
+
+        domain = _normalize_domain(domain)
+        if domain not in VALID_DOMAINS:
+            return {"ok": False, "error": f"invalid domain '{domain}'. Valid: {', '.join(sorted(VALID_DOMAINS))}"}
 
         # Validate confidence range
         if not isinstance(confidence, (int, float)) or confidence < 0.0 or confidence > 1.0:
@@ -141,7 +158,7 @@ def store_memory(
                 """,
                 (
                     memory_id,
-                    domain.strip(),
+                    domain,
                     json.dumps(parsed_tags),
                     content,
                     source_task_id or None,
@@ -155,7 +172,7 @@ def store_memory(
         return {
             "ok": True,
             "memory_id": memory_id,
-            "domain": domain.strip(),
+            "domain": domain,
             "superseded": superseded_id,
         }
 
@@ -241,7 +258,8 @@ def record_decision(
     """Record a structured decision with rationale and alternatives.
 
     Args:
-        domain:         Required. Category: 'backend', 'frontend', 'infra', 'arch', 'process'.
+        domain:         Required. Category: 'backend', 'frontend', 'database',
+                        'infra', 'architecture', 'process', 'general'.
         question:       Required. The question that was decided. E.g. 'Which ORM to use?'
         decision:       Required. The choice made. E.g. 'Prisma'.
         rationale:      Required. Why this choice was made.
@@ -269,6 +287,10 @@ def record_decision(
         if error:
             return error
 
+        domain = _normalize_domain(domain)
+        if domain not in VALID_DOMAINS:
+            return {"ok": False, "error": f"invalid domain '{domain}'. Valid: {', '.join(sorted(VALID_DOMAINS))}"}
+
         parsed_alternatives = _parse_alternatives(alternatives)
         decision_id = str(uuid.uuid4())
         now = time.time()
@@ -283,7 +305,7 @@ def record_decision(
                 """,
                 (
                     decision_id,
-                    domain.strip(),
+                    domain,
                     question.strip(),
                     decision.strip(),
                     rationale.strip(),
@@ -296,7 +318,7 @@ def record_decision(
                 ),
             )
 
-        return {"ok": True, "decision_id": decision_id, "domain": domain.strip()}
+        return {"ok": True, "decision_id": decision_id, "domain": domain}
 
 
 # ---------------------------------------------------------------------------

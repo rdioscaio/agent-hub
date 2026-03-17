@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS playbooks (
     domain      TEXT NOT NULL DEFAULT '*',
     steps       TEXT NOT NULL DEFAULT '[]',
     checklist   TEXT NOT NULL DEFAULT '[]',
+    enforcement TEXT NOT NULL DEFAULT 'advisory',
     version     INTEGER NOT NULL DEFAULT 1,
     active      INTEGER NOT NULL DEFAULT 1,
     created_at  REAL NOT NULL,
@@ -139,6 +140,29 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     created_at     REAL NOT NULL,
     updated_at     REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS knowledge_entries (
+    id                 TEXT PRIMARY KEY,
+    slug               TEXT NOT NULL,
+    version            INTEGER NOT NULL DEFAULT 1,
+    domain             TEXT NOT NULL,
+    kind               TEXT NOT NULL,
+    title              TEXT NOT NULL,
+    content            TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'draft',
+    tags               TEXT NOT NULL DEFAULT '[]',
+    source_type        TEXT NOT NULL,
+    source_id          TEXT,
+    source_task_id     TEXT,
+    root_task_id       TEXT,
+    superseded_by      TEXT,
+    deprecation_reason TEXT,
+    promoted_by        TEXT NOT NULL,
+    reviewed_by        TEXT,
+    created_at         REAL NOT NULL,
+    updated_at         REAL NOT NULL,
+    UNIQUE(slug, version)
+);
 """
 
 _TASK_MIGRATIONS = {
@@ -154,6 +178,27 @@ _TASK_MIGRATIONS = {
     "claimed_at": "REAL",
     "domain": "TEXT DEFAULT 'general'",
 }
+
+_PLAYBOOK_MIGRATIONS = {
+    "enforcement": "TEXT NOT NULL DEFAULT 'advisory'",
+}
+
+
+def _ensure_playbook_columns(conn: sqlite3.Connection) -> None:
+    columns = _table_columns(conn, "playbooks")
+    for name, definition in _PLAYBOOK_MIGRATIONS.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE playbooks ADD COLUMN {name} {definition}")
+            # One-shot: set enforcement='required' for work/automation on first migration only
+            if name == "enforcement":
+                conn.execute(
+                    """
+                    UPDATE playbooks
+                    SET enforcement = 'required'
+                    WHERE task_kind = 'work' AND domain = 'automation' AND active = 1
+                    """
+                )
+
 
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_tasks_root_created ON tasks(root_task_id, created_at)",
@@ -171,6 +216,15 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_metrics_agent_created ON task_metrics(agent, created_at DESC)",
     # Agent Profiles
     "CREATE INDEX IF NOT EXISTS idx_agent_profiles_name_active ON agent_profiles(agent_name, active)",
+    # Knowledge
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_domain_status ON knowledge_entries(domain, status)",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_kind_status ON knowledge_entries(kind, status)",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_slug_status ON knowledge_entries(slug, status)",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_source ON knowledge_entries(source_type, source_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_one_open_per_slug "
+    "ON knowledge_entries(slug) WHERE status IN ('draft', 'active')",
+    # Retrospectives
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_retrospectives_root ON retrospectives(root_task_id)",
 )
 
 
@@ -217,5 +271,6 @@ def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(_SCHEMA)
         _ensure_task_columns(conn)
+        _ensure_playbook_columns(conn)
         for statement in _INDEXES:
             conn.execute(statement)

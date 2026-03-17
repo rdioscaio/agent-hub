@@ -23,5 +23,6 @@ def ensure_ready() -> None:
     init_db()
 
     # Functional: default playbooks seed
-    from tools.playbooks import seed_default_playbooks
+    from tools.playbooks import seed_default_playbooks, upgrade_default_playbooks
     seed_default_playbooks()
+    upgrade_default_playbooks()

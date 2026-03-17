@@ -24,6 +24,108 @@ from tools.tasks import (
 
 REVIEW_VERDICTS = {"approve", "revise", "fallback"}
 PLANNED_TASK_KINDS = {"work", "review", "synthesize"}
+AUTO_ROUTING_SENTINEL = "auto"
+
+
+def _find_specialist(conn, domain: str, required_kind: str) -> str | None:
+    """Find the best active specialist for a domain + task kind.
+
+    Returns the agent_name of the first matching specialist (alphabetical
+    tiebreak), or None if no match.  Internal helper — NOT an MCP tool.
+
+    A match requires:
+      1. agent is active
+      2. domain appears in the agent's domains list
+      3. required_kind appears in the agent's task_kinds list, OR task_kinds
+         is empty (meaning the agent accepts all kinds)
+    """
+    if not domain or domain == "general":
+        return None
+
+    rows = conn.execute(
+        "SELECT agent_name, domains, task_kinds FROM agent_profiles WHERE active = 1"
+    ).fetchall()
+
+    candidates: list[str] = []
+    for row in rows:
+        agent_domains = json.loads(row["domains"] or "[]")
+        if domain not in agent_domains:
+            continue
+        agent_kinds = json.loads(row["task_kinds"] or "[]")
+        if agent_kinds and required_kind not in agent_kinds:
+            continue
+        candidates.append(row["agent_name"])
+
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[0]
+
+
+def _resolve_agents(
+    conn,
+    domain: str,
+    worker_agent: str,
+    reviewer_agent: str,
+    synthesizer_agent: str,
+    fallback_agent: str,
+) -> dict:
+    """Resolve agent assignments when the sentinel 'auto' is used.
+
+    Decision rules per role:
+      - "auto"  → resolve via _find_specialist; fall back to original default
+                   if no specialist found
+      - ""      → use original default for the role
+      - explicit → preserve as-is
+
+    Returns a dict with resolved values and routing metadata.
+    """
+    defaults = {
+        "worker_agent": "codex",
+        "reviewer_agent": "claude",
+        "synthesizer_agent": "codex-general",
+        "fallback_agent": "gpt-fallback",
+    }
+    role_kind_map = {
+        "worker_agent": "work",
+        "reviewer_agent": "review",
+        "synthesizer_agent": "synthesize",
+        "fallback_agent": "fallback",
+    }
+    inputs = {
+        "worker_agent": worker_agent,
+        "reviewer_agent": reviewer_agent,
+        "synthesizer_agent": synthesizer_agent,
+        "fallback_agent": fallback_agent,
+    }
+    resolved = {}
+    routing_detail: dict[str, dict] = {}
+
+    for role, value in inputs.items():
+        if value == AUTO_ROUTING_SENTINEL:
+            specialist = _find_specialist(conn, domain, role_kind_map[role])
+            resolved[role] = specialist or defaults[role]
+            routing_detail[role] = {
+                "input": "auto",
+                "resolved": resolved[role],
+                "method": "specialist" if specialist else "default_fallback",
+            }
+        elif value == "":
+            resolved[role] = defaults[role]
+            routing_detail[role] = {
+                "input": "",
+                "resolved": resolved[role],
+                "method": "default",
+            }
+        else:
+            resolved[role] = value
+            routing_detail[role] = {
+                "input": value,
+                "resolved": value,
+                "method": "explicit",
+            }
+
+    return {"agents": resolved, "routing": routing_detail, "domain": domain}
 
 
 def _truncate(text: str, limit: int = 72) -> str:
@@ -349,7 +451,7 @@ def submit_request(
     worker_agent: str = "codex",
     reviewer_agent: str = "claude",
     fallback_agent: str = "gpt-fallback",
-    synthesizer_agent: str = "codex",
+    synthesizer_agent: str = "codex-general",
     max_work_items: int = 3,
 ) -> dict:
     """Turn a natural-language request into a rooted task tree with review and synthesis stages."""
@@ -369,6 +471,28 @@ def submit_request(
         # Classify domain once from the original request text — propagated to all tasks
         request_domain = classify_domain(request, "")
 
+        # --- Auto-routing: resolve agents when sentinel "auto" is used ---
+        routing_metadata = None
+        any_auto = AUTO_ROUTING_SENTINEL in (worker_agent, reviewer_agent, synthesizer_agent, fallback_agent)
+        if any_auto:
+            with get_conn() as conn:
+                resolution = _resolve_agents(
+                    conn, request_domain,
+                    worker_agent, reviewer_agent, synthesizer_agent, fallback_agent,
+                )
+            agents = resolution["agents"]
+            worker_agent = agents["worker_agent"]
+            reviewer_agent = agents["reviewer_agent"]
+            synthesizer_agent = agents["synthesizer_agent"]
+            fallback_agent = agents["fallback_agent"]
+            routing_metadata = resolution
+        else:
+            # Preserve legacy defaults when callers pass empty strings explicitly.
+            worker_agent = worker_agent or "codex"
+            reviewer_agent = reviewer_agent or "claude"
+            synthesizer_agent = synthesizer_agent or "codex-general"
+            fallback_agent = fallback_agent or "gpt-fallback"
+
         root = create_task(
             title=f"Request: {_truncate(request, 56)}",
             description=request,
@@ -383,10 +507,28 @@ def submit_request(
                 "reviewer_agent": reviewer_agent,
                 "fallback_agent": fallback_agent,
                 "synthesizer_agent": synthesizer_agent,
+                **({"routing": routing_metadata} if routing_metadata else {}),
             },
             domain=request_domain,
         )
         root_task_id = root["task_id"]
+
+        # Routing observability note
+        if routing_metadata:
+            routing_summary_parts = []
+            for role, detail in routing_metadata.get("routing", {}).items():
+                if detail["method"] != "explicit":
+                    routing_summary_parts.append(
+                        f"{role}: {detail['input']} → {detail['resolved']} ({detail['method']})"
+                    )
+            if routing_summary_parts:
+                append_note(
+                    f"Auto-routing resolved for domain '{request_domain}': "
+                    + "; ".join(routing_summary_parts),
+                    task_id=root_task_id,
+                    author="hub-router",
+                )
+
         plan = _generate_plan(
             request,
             priority,

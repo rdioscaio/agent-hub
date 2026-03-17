@@ -21,6 +21,7 @@ VALID_DOMAINS = frozenset({
     "frontend",
     "database",
     "infra",
+    "automation",
     "architecture",
     "process",
     "general",
@@ -36,7 +37,8 @@ DOMAIN_KEYWORDS: dict[str, list[str]] = {
     "frontend": [
         "ui", "react", "component", "page", "layout", "css",
         "style", "vite", "tailwind", "responsive", "form",
-        "button", "modal", "sidebar",
+        "button", "modal", "sidebar", "dashboard loading", "dashboard load",
+        "animation", "accessibility",
     ],
     "database": [
         "sql", "query", "migration", "schema", "table", "index",
@@ -47,15 +49,20 @@ DOMAIN_KEYWORDS: dict[str, list[str]] = {
         "railway", "nginx", "env", "config", "monitoring",
         "logging", "github actions",
     ],
+    "automation": [
+        "n8n", "cron", "trigger", "webhook", "scheduler",
+        "zapier", "automate", "automation",
+        "automated flow", "integration flow",
+    ],
     "architecture": [
         "refactor", "pattern", "abstraction", "module",
         "interface", "dependency", "coupling", "design",
-        "structure", "separation",
+        "structure", "separation", "boundary", "tradeoff",
     ],
     "process": [
         "review", "checklist", "workflow", "standup",
         "retrospective", "planning", "sprint", "backlog",
-        "priority",
+        "priority", "documentation", "roadmap",
     ],
 }
 
@@ -65,6 +72,7 @@ DOMAIN_PRIORITY = [
     "frontend",
     "database",
     "infra",
+    "automation",
     "architecture",
     "process",
 ]

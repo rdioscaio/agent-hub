@@ -408,6 +408,84 @@ def heartbeat_task(task_id: str, owner: str, status: str = "") -> dict:
         return {"ok": True, "task_id": task_id, "heartbeat_at": now}
 
 
+def _check_checklist_gate(conn, task_id: str, task_kind: str, domain: str) -> dict | None:
+    """Check if a playbook enforcement gate blocks completion.
+
+    Returns None if gate passes (or no gate applies).
+    Returns {"ok": False, "error": ...} dict if gate blocks.
+    """
+    # Only enforce for task kinds that have playbooks
+    playbook_row = conn.execute(
+        "SELECT enforcement FROM playbooks WHERE task_kind = ? AND domain = ? AND active = 1 "
+        "ORDER BY version DESC LIMIT 1",
+        (task_kind, domain),
+    ).fetchone()
+    # Fallback to generic domain
+    if not playbook_row and domain != "*":
+        playbook_row = conn.execute(
+            "SELECT enforcement FROM playbooks WHERE task_kind = ? AND domain = '*' AND active = 1 "
+            "ORDER BY version DESC LIMIT 1",
+            (task_kind,),
+        ).fetchone()
+
+    if not playbook_row:
+        return None  # No playbook → no gate
+
+    enforcement = playbook_row["enforcement"] or "advisory"
+    if enforcement != "required":
+        return None  # Advisory → no gate
+
+    # Gate active: look for a valid checklist note
+    notes = conn.execute(
+        "SELECT content FROM notes WHERE task_id = ? ORDER BY created_at DESC",
+        (task_id,),
+    ).fetchall()
+
+    for note in notes:
+        content = note["content"] or ""
+        if "[CHECKLIST ADVISORY]" not in content:
+            continue
+        # Parse the JSON payload after the pipe
+        pipe_idx = content.find("| {")
+        if pipe_idx < 0:
+            continue
+        try:
+            payload = json.loads(content[pipe_idx + 2:])
+            score = float(payload.get("score", 0))
+            if score < 1.0:
+                failed_items = payload.get("failed_items", [])
+                reason = f"checklist score {score:.2f} < 1.0"
+                _append_gate_note(conn, task_id, reason, task_kind, domain, failed_items)
+                return {"ok": False, "error": f"checklist enforcement blocked: {reason}"}
+            return None  # Most recent valid checklist passes the gate
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+
+    # No valid checklist note found at all
+    reason = "no checklist validation found"
+    _append_gate_note(conn, task_id, reason, task_kind, domain)
+    return {"ok": False, "error": f"checklist enforcement blocked: {reason}"}
+
+
+def _append_gate_note(conn, task_id: str, reason: str, task_kind: str, domain: str, failed_items: list[str] | None = None) -> None:
+    """Append a [CHECKLIST GATE] blocked note for observability."""
+    import uuid as _uuid
+    note_id = str(_uuid.uuid4())
+    now = time.time()
+    failed_items = failed_items or []
+    suffix = f" | failed_items={json.dumps(failed_items, ensure_ascii=False)}" if failed_items else ""
+    conn.execute(
+        "INSERT INTO notes (id, task_id, author, content, created_at) VALUES (?, ?, ?, ?, ?)",
+        (
+            note_id,
+            task_id,
+            "checklist-gate",
+            f"[CHECKLIST GATE] blocked | reason={reason}{suffix} | task_kind={task_kind} | domain={domain}",
+            now,
+        ),
+    )
+
+
 def complete_task(task_id: str, owner: str) -> dict:
     """Mark a task as done."""
     args = dict(task_id=task_id, owner=owner)
@@ -415,7 +493,7 @@ def complete_task(task_id: str, owner: str) -> dict:
         now = time.time()
         with get_conn() as conn:
             row = conn.execute(
-                "SELECT status, owner, review_policy, task_kind FROM tasks WHERE id = ?",
+                "SELECT status, owner, review_policy, task_kind, domain FROM tasks WHERE id = ?",
                 (task_id,),
             ).fetchone()
             if not row:
@@ -424,6 +502,14 @@ def complete_task(task_id: str, owner: str) -> dict:
                 return {"ok": False, "error": f"task already '{row['status']}'"}
             if row["owner"] and row["owner"] != owner:
                 return {"ok": False, "error": "task owned by another agent"}
+
+            # Checklist enforcement gate (opt-in via playbook)
+            gate_result = _check_checklist_gate(
+                conn, task_id, row["task_kind"] or "work", row["domain"] or "general"
+            )
+            if gate_result is not None:
+                return gate_result
+
             quality_status = "approved" if row["task_kind"] == "review" else "awaiting_review"
             if row["review_policy"] in ("none", "") or row["task_kind"] in {"review", "request", "synthesize"}:
                 quality_status = "approved"

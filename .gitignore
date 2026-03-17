@@ -29,3 +29,9 @@ db/*.sqlite-wal
 .mypy_cache/
 htmlcov/
 .coverage
+
+# Runtime DB (root-level)
+agent_hub.db
+
+# Local settings (personal permissions/hooks)
+.claude/settings.local.json
