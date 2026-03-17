@@ -16,6 +16,8 @@ Tools exposed:
   Retros   : generate_retrospective, get_retrospective
   Metrics  : get_metrics
   Agents   : register_agent, get_agent_profile, list_agents
+  Remote   : remote_exec, remote_read_file, remote_write_file,
+             remote_list_dir, remote_explore_project
 """
 
 import sys
@@ -48,6 +50,13 @@ from tools.orchestration import (
     record_review,
     submit_request,
     summarize_request,
+)
+from tools.remote import (
+    remote_exec,
+    remote_explore_project,
+    remote_list_dir,
+    remote_read_file,
+    remote_write_file,
 )
 from tools.tasks import (
     claim_next_task,
@@ -116,6 +125,13 @@ mcp.tool()(get_metrics)
 mcp.tool()(register_agent)
 mcp.tool()(get_agent_profile)
 mcp.tool()(list_agents)
+
+# --- Remote ---
+mcp.tool()(remote_exec)
+mcp.tool()(remote_read_file)
+mcp.tool()(remote_write_file)
+mcp.tool()(remote_list_dir)
+mcp.tool()(remote_explore_project)
 
 # --- Orchestration ---
 mcp.tool()(submit_request)
