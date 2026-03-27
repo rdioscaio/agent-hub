@@ -1,0 +1,253 @@
+name: Env Audit Advisory
+
+on:
+  workflow_dispatch:
+    inputs:
+      vps:
+        description: VPS to audit
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - hub
+          - next
+          - maincua
+      artifact_format:
+        description: Report artifacts to upload. JSON is always generated for summary parsing.
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - json
+          - markdown
+
+jobs:
+  env-audit:
+    name: Run advisory env audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      AUDIT_MODE: advisory
+      AUDIT_VPS: ${{ inputs.vps }}
+      ARTIFACT_FORMAT: ${{ inputs.artifact_format }}
+      ENV_AUDIT_ACCESS_OVERRIDES: >-
+        {"hub":{"mode":"ssh","host_alias":"hub","sudo":false}}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Configure SSH access
+        shell: bash
+        env:
+          ENV_AUDIT_SSH_PRIVATE_KEY: ${{ secrets.ENV_AUDIT_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ENV_AUDIT_SSH_PRIVATE_KEY}" ]; then
+            echo "Missing required secret: ENV_AUDIT_SSH_PRIVATE_KEY" >&2
+            exit 2
+          fi
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${ENV_AUDIT_SSH_PRIVATE_KEY}" > ~/.ssh/id_ed25519_env_audit
+          chmod 600 ~/.ssh/id_ed25519_env_audit
+
+          cat > ~/.ssh/config <<'EOF'
+          Host hub
+            HostName 157.180.26.156
+            User rdios
+            IdentityFile ~/.ssh/id_ed25519_env_audit
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
+
+          Host next
+            HostName 157.180.23.54
+            User rdios
+            IdentityFile ~/.ssh/id_ed25519_env_audit
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
+
+          Host maincua-prod
+            HostName 37.27.252.206
+            User rdios
+            IdentityFile ~/.ssh/id_ed25519_env_audit
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
+          EOF
+          chmod 600 ~/.ssh/config
+
+          touch ~/.ssh/known_hosts
+          ssh-keyscan -H 157.180.26.156 157.180.23.54 37.27.252.206 >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Run advisory audit
+        id: audit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARTIFACT_DIR="${RUNNER_TEMP}/env-audit"
+          mkdir -p "${ARTIFACT_DIR}"
+
+          ARTIFACT_BASE="env-audit-${AUDIT_VPS}-${GITHUB_RUN_ID}"
+          JSON_PATH="${ARTIFACT_DIR}/${ARTIFACT_BASE}.json"
+          MD_PATH="${ARTIFACT_DIR}/${ARTIFACT_BASE}.md"
+
+          echo "artifact_base=${ARTIFACT_BASE}" >> "${GITHUB_OUTPUT}"
+          echo "json_path=${JSON_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "md_path=${MD_PATH}" >> "${GITHUB_OUTPUT}"
+
+          set +e
+          python3 tools/run_env_audit.py \
+            --vps "${AUDIT_VPS}" \
+            --mode "${AUDIT_MODE}" \
+            --report json \
+            --output-path "${JSON_PATH}"
+          AUDIT_EXIT_CODE=$?
+          set -e
+
+          echo "audit_exit_code=${AUDIT_EXIT_CODE}" >> "${GITHUB_OUTPUT}"
+
+          if [ "${ARTIFACT_FORMAT}" = "markdown" ] || [ "${ARTIFACT_FORMAT}" = "both" ]; then
+            set +e
+            python3 tools/run_env_audit.py \
+              --vps "${AUDIT_VPS}" \
+              --mode "${AUDIT_MODE}" \
+              --report markdown \
+              --output-path "${MD_PATH}"
+            MD_EXIT_CODE=$?
+            set -e
+
+            if [ "${MD_EXIT_CODE}" -ne 0 ] && [ "${MD_EXIT_CODE}" -ne 10 ]; then
+              echo "Markdown report generation failed with exit code ${MD_EXIT_CODE}" >&2
+              exit "${MD_EXIT_CODE}"
+            fi
+          fi
+
+          if [ "${AUDIT_EXIT_CODE}" = "10" ]; then
+            echo "::warning title=Env audit advisory drift detected::Review the summary and uploaded report artifacts."
+            exit 0
+          fi
+
+          if [ "${AUDIT_EXIT_CODE}" = "0" ]; then
+            echo "::notice title=Env audit clean::No findings detected."
+            exit 0
+          fi
+
+          echo "Env audit failed with exit code ${AUDIT_EXIT_CODE}" >&2
+          exit "${AUDIT_EXIT_CODE}"
+
+      - name: Upload JSON artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.audit.outputs.artifact_base }}-json
+          path: ${{ steps.audit.outputs.json_path }}
+          if-no-files-found: warn
+
+      - name: Upload Markdown artifact
+        if: always() && (inputs.artifact_format == 'both' || inputs.artifact_format == 'markdown')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.audit.outputs.artifact_base }}-markdown
+          path: ${{ steps.audit.outputs.md_path }}
+          if-no-files-found: warn
+
+      - name: Publish workflow summary
+        if: always()
+        shell: bash
+        env:
+          AUDIT_EXIT_CODE: ${{ steps.audit.outputs.audit_exit_code }}
+          ARTIFACT_BASE: ${{ steps.audit.outputs.artifact_base }}
+          JSON_PATH: ${{ steps.audit.outputs.json_path }}
+          ARTIFACT_FORMAT: ${{ inputs.artifact_format }}
+          AUDIT_VPS: ${{ inputs.vps }}
+          REVIEW_OWNER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          json_path = Path(os.environ["JSON_PATH"])
+          audit_exit_code = os.environ.get("AUDIT_EXIT_CODE", "")
+          artifact_base = os.environ.get("ARTIFACT_BASE", "env-audit")
+          review_owner = os.environ.get("REVIEW_OWNER", "<unknown>")
+          audit_vps = os.environ.get("AUDIT_VPS", "<unknown>")
+          artifact_format = os.environ.get("ARTIFACT_FORMAT", "both")
+
+          lines = [
+              "## Env Audit Advisory",
+              "",
+              f"- vps: `{audit_vps}`",
+              f"- mode: `advisory`",
+              f"- review owner: `{review_owner}`",
+              f"- exit code: `{audit_exit_code or '<missing>'}`",
+              f"- uploaded artifact base: `{artifact_base}`",
+              "",
+          ]
+
+          if json_path.exists():
+              payload = json.loads(json_path.read_text(encoding="utf-8"))
+              lines.extend(
+                  [
+                      f"- status: `{payload.get('status', '<unknown>')}`",
+                      f"- findings: `{payload.get('finding_count', 0)}`",
+                      f"- errors: `{payload.get('error_count', 0)}`",
+                      "",
+                      "### By VPS",
+                  ]
+              )
+              for item in payload.get("vps_results", []):
+                  lines.append(
+                      f"- `{item['vps']}`: status=`{item['status']}` scope=`{item['scope_status']}` wiring=`{item['wiring_status']}`"
+                  )
+          else:
+              lines.extend(
+                  [
+                      "- status: `ERROR`",
+                      "- findings: `<unknown>`",
+                      "- errors: `1`",
+                      "",
+                      "JSON report was not generated.",
+                  ]
+              )
+
+          lines.extend(
+              [
+                  "",
+                  "### Artifact names",
+                  f"- `{artifact_base}.json`",
+              ]
+          )
+          if artifact_format in {"both", "markdown"}:
+              lines.append(f"- `{artifact_base}.md`")
+
+          lines.extend(
+              [
+                  "",
+                  "### Policy",
+                  "- `0`: clean run",
+                  "- `10`: advisory warning, review required, no hard gate",
+                  "- `2`: execution error, treat as failure",
+              ]
+          )
+
+          summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
