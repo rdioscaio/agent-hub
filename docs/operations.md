@@ -127,6 +127,19 @@ Rotation guardrails:
 - treat unexpected host key change as an infrastructure event first; verify the target before publishing a new key
 - keep the pin to `ssh-ed25519` unless there is an explicit operational reason to expand accepted host key types
 
+Workflow maintenance checklist:
+1. Confirm `ENV_AUDIT_SSH_PRIVATE_KEY` still matches the private key authorized on `HUB VPS`, `NEXT VPS`, and `MAINCUA VPS`.
+2. Confirm the pinned host keys in `.github/workflows/env-audit-advisory.yml` still match `/etc/ssh/ssh_host_ed25519_key.pub` on each VPS.
+3. Run `Env Audit Advisory` with `vps = hub` after any SSH-key, host-key, or workflow bootstrap change.
+4. Run `Env Audit Advisory` with `vps = all` after any fleet-wide env-scope, wiring, or SSH bootstrap change.
+5. Review the workflow summary and both uploaded artifacts:
+   `env-audit-<vps>-<run_id>-json` and `env-audit-<vps>-<run_id>-markdown`.
+6. Interpret exit codes exactly:
+   `0` clean, `10` advisory drift, `2` execution/control failure.
+7. If `exit_code=2`, fix the control path before changing the environment again.
+8. If `exit_code=10`, either fix drift or update `docs/env-scope-matrix.md` in the same change set when the change was intentional.
+9. Keep the workflow in advisory mode until repeated clean runs prove a stricter gate is worth the operational cost.
+
 Review ownership and SLA:
 - default review owner is the operator who triggered the workflow or manual command
 - `exit_code=2` must be triaged the same day because it means the control itself is broken
