@@ -209,6 +209,39 @@ Policy for wiring findings:
 - `SERVICE_NOT_MAPPED`: either restore the mapped service/compose entry or update the wiring spec
 - `WIRING_PATH_MISMATCH`: fix the declared path, source unit path, or static loader pattern
 
+For advisory discovery of unmapped sensitive candidates by VPS, run:
+```bash
+python3 tools/env_discovery_checker.py --vps hub --report markdown
+python3 tools/env_discovery_checker.py --vps next --report markdown
+python3 tools/env_discovery_checker.py --vps maincua --report markdown
+```
+
+For a full fleet discovery pass:
+```bash
+python3 tools/env_discovery_checker.py --vps all --report markdown
+```
+
+This discovery checker derives its allowlist from the existing scope and wiring baselines.
+It does not introduce a third source of truth.
+
+What the discovery checker validates:
+- env-like files under monitored roots that are outside the current matrix
+- systemd services with sensitive `EnvironmentFile` references that are outside the current wiring spec
+- Docker Compose services with `env_file` references that are outside the current wiring spec
+- env file references from systemd or Compose that are outside the current matrix
+
+What the discovery checker does not validate:
+- secret values
+- live process environment
+- every system service on the host; it filters to env-sensitive references
+- business criticality; findings are candidates, not auto-classified incidents
+
+Policy for discovery findings:
+- `UNMAPPED_ENV_FILE`: either add the file to the matrix with explicit scope or move it out of monitored roots
+- `UNMAPPED_SYSTEMD_SERVICE`: either map the service in the wiring spec or document why it is intentionally outside the env-audit contract
+- `UNMAPPED_COMPOSE_SERVICE`: either map the Compose service in the wiring spec or document why it is intentionally outside the env-audit contract
+- `UNMAPPED_ENVIRONMENT_FILE`: either map the referenced env file in the matrix or remove the reference from the service definition
+
 Handling flow for advisory audit findings:
 - if the runner returns `10`, read the consolidated report first, then drill into `env_scope_checker` or `env_wiring_checker` only where needed
 - if the finding reflects intended change, update the matrix/spec before changing the service again

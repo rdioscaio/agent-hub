@@ -45,6 +45,7 @@ Use the docs in this order when advancing the project:
    - then run `tools/run_env_audit.py` for recurring advisory audit
    - use `tools/env_scope_checker.py` for v1 scope drill-down
    - use `tools/env_wiring_checker.py` for static wiring drill-down
+   - use `tools/env_discovery_checker.py` for advisory discovery of unmapped env-sensitive candidates
 4. `docs/architecture.md`
 5. `docs/mcp-surfaces.md`
 6. `docs/sse-deployment.md`
