@@ -40,6 +40,13 @@ class TestEnvAuditWorkflow(unittest.TestCase):
         self.assertIn("f\"- `{artifact_base}.json`\"", text)
         self.assertIn("lines.append(f\"- `{artifact_base}.md`\")", text)
 
+    def test_workflow_summary_policy_section_has_expected_exit_codes(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("### Policy", text)
+        self.assertIn("- `0`: clean run", text)
+        self.assertIn("- `10`: advisory warning, review required, no hard gate", text)
+        self.assertIn("- `2`: execution error, treat as failure", text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
