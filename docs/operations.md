@@ -103,6 +103,29 @@ Workflow requirements:
 - repository secret `ENV_AUDIT_SSH_PRIVATE_KEY` must contain the SSH private key used for advisory audit access
 - the workflow runs on a GitHub-hosted runner and audits `HUB VPS` by SSH override because `/home/rdios/...` does not exist on the hosted runner
 - `HUB VPS`, `NEXT VPS`, and `MAINCUA VPS` must accept the audit key for user `rdios`
+- the workflow pins SSH host keys in `.github/workflows/env-audit-advisory.yml`; do not replace that with runtime `ssh-keyscan`
+
+Pinned SSH host key rotation:
+1. On each target host, read the active ED25519 host key and fingerprint:
+```bash
+sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+sudo cat /etc/ssh/ssh_host_ed25519_key.pub
+```
+2. Compare the fingerprint with the current pinned entry in `.github/workflows/env-audit-advisory.yml`.
+3. Update the `known_hosts` block in `.github/workflows/env-audit-advisory.yml` only for the host that rotated.
+4. Validate locally:
+```bash
+python3 -m unittest tests.test_env_audit_access tests.test_env_scope_checker tests.test_env_wiring_checker tests.test_run_env_audit tests.test_env_audit_workflow
+python3 tests/smoke_test.py
+```
+5. Publish the workflow change to `main`.
+6. Rerun `Env Audit Advisory` for `hub` if the rotated host is `HUB VPS`; otherwise rerun `all` to prove the fleet still authenticates cleanly.
+
+Rotation guardrails:
+- never use `.pub` user keys from `/home/rdios/.ssh/`; pin only `/etc/ssh/ssh_host_ed25519_key.pub` from the target VPS
+- never reintroduce `ssh-keyscan` in CI just to avoid updating the pinned key
+- treat unexpected host key change as an infrastructure event first; verify the target before publishing a new key
+- keep the pin to `ssh-ed25519` unless there is an explicit operational reason to expand accepted host key types
 
 Review ownership and SLA:
 - default review owner is the operator who triggered the workflow or manual command
