@@ -33,6 +33,13 @@ class TestEnvAuditWorkflow(unittest.TestCase):
         self.assertIn("### By VPS", text)
         self.assertIn("discovery=`{item['discovery_status']}`", text)
 
+    def test_workflow_uses_expected_artifact_names(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("name: ${{ steps.audit.outputs.artifact_base }}-json", text)
+        self.assertIn("name: ${{ steps.audit.outputs.artifact_base }}-markdown", text)
+        self.assertIn("f\"- `{artifact_base}.json`\"", text)
+        self.assertIn("lines.append(f\"- `{artifact_base}.md`\")", text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
