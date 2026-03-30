@@ -28,6 +28,11 @@ class TestEnvAuditWorkflow(unittest.TestCase):
         self.assertIn('if [ "${AUDIT_EXIT_CODE}" = "0" ]; then', text)
         self.assertIn('exit "${AUDIT_EXIT_CODE}"', text)
 
+    def test_workflow_summary_mentions_discovery_layer(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("### By VPS", text)
+        self.assertIn("discovery=`{item['discovery_status']}`", text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
