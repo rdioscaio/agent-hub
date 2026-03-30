@@ -42,7 +42,7 @@ Use the docs in this order when advancing the project:
 1. `README.md`
 2. `docs/configuration.md`
 3. `docs/env-scope-matrix.md`
-   - then run `tools/run_env_audit.py` for recurring advisory audit
+   - then run `tools/run_env_audit.py` for recurring advisory audit across scope, wiring, and discovery
    - use `tools/env_scope_checker.py` for v1 scope drill-down
    - use `tools/env_wiring_checker.py` for static wiring drill-down
    - use `tools/env_discovery_checker.py` for advisory discovery of unmapped env-sensitive candidates

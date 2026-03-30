@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run env scope and wiring audits in one advisory-friendly command."""
+"""Run env scope, wiring, and discovery audits in one advisory-friendly command."""
 
 from __future__ import annotations
 
@@ -13,12 +13,22 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools import env_scope_checker, env_wiring_checker
+from tools import env_discovery_checker, env_scope_checker, env_wiring_checker
 
 EXIT_OK = 0
 EXIT_STRICT_DRIFT = 1
 EXIT_ERROR = 2
 EXIT_ADVISORY_DRIFT = 10
+
+CHECKER_NAMES = ("scope", "wiring", "discovery")
+
+
+def _checker_specs() -> tuple[tuple[str, object], ...]:
+    return (
+        ("scope", env_scope_checker.generate_report),
+        ("wiring", env_wiring_checker.generate_report),
+        ("discovery", env_discovery_checker.generate_report),
+    )
 
 
 def _run_checker(
@@ -77,33 +87,38 @@ def _index_checker_results(report: dict | None) -> dict[str, dict]:
 
 
 def _build_vps_results(selected_vps: list[str], checker_runs: list[dict]) -> list[dict]:
-    scope_run = next((item for item in checker_runs if item["checker"] == "scope"), None)
-    wiring_run = next((item for item in checker_runs if item["checker"] == "wiring"), None)
-    scope_index = _index_checker_results(scope_run["report"] if scope_run else None)
-    wiring_index = _index_checker_results(wiring_run["report"] if wiring_run else None)
+    checker_names = list(CHECKER_NAMES)
+    checker_lookup = {
+        item["checker"]: item
+        for item in checker_runs
+    }
+    checker_indexes = {
+        name: _index_checker_results(checker_lookup[name]["report"])
+        for name in checker_names
+        if name in checker_lookup
+    }
 
     results: list[dict] = []
     for vps_id in selected_vps:
-        scope_status = "ERROR" if scope_run and scope_run["status"] == "ERROR" else scope_index.get(vps_id, {}).get("status", "UNMAPPED")
-        wiring_status = "ERROR" if wiring_run and wiring_run["status"] == "ERROR" else wiring_index.get(vps_id, {}).get("status", "UNMAPPED")
-        scope_findings = scope_index.get(vps_id, {}).get("finding_count", 0)
-        wiring_findings = wiring_index.get(vps_id, {}).get("finding_count", 0)
-        if "ERROR" in {scope_status, wiring_status}:
+        result = {"vps": vps_id}
+        statuses: set[str] = set()
+        for checker_name in checker_names:
+            checker_run = checker_lookup.get(checker_name)
+            checker_index = checker_indexes.get(checker_name, {})
+            item = checker_index.get(vps_id, {})
+            status = "ERROR" if checker_run and checker_run["status"] == "ERROR" else item.get("status", "UNMAPPED")
+            finding_count = item.get("finding_count", 0)
+            result[f"{checker_name}_status"] = status
+            result[f"{checker_name}_finding_count"] = finding_count
+            statuses.add(status)
+        if "ERROR" in statuses:
             status = "ERROR"
-        elif "DRIFT" in {scope_status, wiring_status}:
+        elif "DRIFT" in statuses:
             status = "DRIFT"
         else:
             status = "OK"
-        results.append(
-            {
-                "vps": vps_id,
-                "status": status,
-                "scope_status": scope_status,
-                "scope_finding_count": scope_findings,
-                "wiring_status": wiring_status,
-                "wiring_finding_count": wiring_findings,
-            }
-        )
+        result["status"] = status
+        results.append(result)
     return results
 
 
@@ -122,8 +137,8 @@ def generate_report(
     mode: str,
 ) -> tuple[int, dict]:
     checker_runs = [
-        _run_checker("scope", env_scope_checker.generate_report, matrix_path, requested_vps, timeout_seconds),
-        _run_checker("wiring", env_wiring_checker.generate_report, matrix_path, requested_vps, timeout_seconds),
+        _run_checker(name, generator, matrix_path, requested_vps, timeout_seconds)
+        for name, generator in _checker_specs()
     ]
     selected_vps = _ordered_selected_vps(checker_runs, requested_vps)
     error_count = sum(1 for item in checker_runs if item["status"] == "ERROR")
@@ -172,12 +187,17 @@ def render_report(report: dict, report_format: str) -> str:
         "",
         "## By VPS",
     ]
+    checker_names = [checker["checker"] for checker in report["checkers"]] or list(CHECKER_NAMES)
     if not report["vps_results"]:
         lines.append("- UNAVAILABLE")
     else:
         for item in report["vps_results"]:
+            suffix = []
+            for checker_name in checker_names:
+                suffix.append(f"{checker_name}={item[f'{checker_name}_status']}")
+                suffix.append(f"{checker_name}_findings={item[f'{checker_name}_finding_count']}")
             lines.append(
-                f"- {item['status']} vps={item['vps']} scope={item['scope_status']} scope_findings={item['scope_finding_count']} wiring={item['wiring_status']} wiring_findings={item['wiring_finding_count']}"
+                f"- {item['status']} vps={item['vps']} {' '.join(suffix)}"
             )
 
     lines.extend(["", "## Checkers"])
@@ -206,6 +226,12 @@ def render_report(report: dict, report_format: str) -> str:
                     suffix.append(f"target={finding['target']}")
                 if "kind" in finding and finding["kind"]:
                     suffix.append(f"kind={finding['kind']}")
+                if "service" in finding and finding["service"]:
+                    suffix.append(f"service={finding['service']}")
+                if "source_kind" in finding and finding["source_kind"]:
+                    suffix.append(f"source_kind={finding['source_kind']}")
+                if "source" in finding and finding["source"]:
+                    suffix.append(f"source={finding['source']}")
                 extra = f" {' '.join(suffix)}" if suffix else ""
                 lines.append(
                     f"- {finding['code']} checker={checker_run['checker']} vps={finding['vps']} path={finding['path']}{extra}"

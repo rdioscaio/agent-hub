@@ -65,7 +65,7 @@ python3 tools/env_scope_checker.py --vps next --report markdown
 python3 tools/env_scope_checker.py --vps maincua --report markdown
 ```
 
-For the recurring advisory audit that combines scope and wiring, run:
+For the recurring advisory audit that combines scope, wiring, and discovery, run:
 ```bash
 python3 tools/run_env_audit.py --vps hub --mode advisory --report markdown
 python3 tools/run_env_audit.py --vps next --mode advisory --report markdown
@@ -93,6 +93,11 @@ Runner exit codes:
 - `10`: advisory findings detected
 - `1`: strict findings detected
 - `2`: checker execution or schema error
+
+The consolidated runner includes:
+- `env_scope_checker` for allowed placement and presence of mapped variables
+- `env_wiring_checker` for static service wiring and target order
+- `env_discovery_checker` for unmapped env-sensitive candidates outside the current contract
 
 Advisory CI/manual policy:
 - treat `10` as warning/report, not as deploy blocker

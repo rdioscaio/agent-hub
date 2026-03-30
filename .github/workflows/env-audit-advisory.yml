@@ -219,7 +219,7 @@ jobs:
               )
               for item in payload.get("vps_results", []):
                   lines.append(
-                      f"- `{item['vps']}`: status=`{item['status']}` scope=`{item['scope_status']}` wiring=`{item['wiring_status']}`"
+                      f"- `{item['vps']}`: status=`{item['status']}` scope=`{item['scope_status']}` wiring=`{item['wiring_status']}` discovery=`{item['discovery_status']}`"
                   )
           else:
               lines.extend(

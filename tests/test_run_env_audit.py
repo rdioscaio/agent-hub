@@ -85,30 +85,70 @@ def _wiring_report(status: str = "OK", finding_count: int = 0) -> dict:
     }
 
 
+def _discovery_report(status: str = "OK", finding_count: int = 0) -> dict:
+    findings = []
+    if finding_count:
+        findings = [
+            {
+                "code": "UNMAPPED_SYSTEMD_SERVICE",
+                "vps": "maincua",
+                "path": "/etc/systemd/system/protocolo-backend.service",
+                "service": "protocolo-backend.service",
+                "message": "service not mapped",
+            }
+        ]
+    return {
+        "ok": status == "OK",
+        "status": status,
+        "matrix_path": "docs/env-scope-matrix.md",
+        "selected_vps": ["maincua"],
+        "finding_count": finding_count,
+        "env_candidate_count": 1,
+        "systemd_candidate_count": 1,
+        "compose_candidate_count": 0,
+        "results": [
+            {
+                "vps": "maincua",
+                "label": "MAINCUA VPS",
+                "status": status,
+                "env_candidate_count": 1,
+                "systemd_candidate_count": 1,
+                "compose_candidate_count": 0,
+                "finding_count": finding_count,
+                "findings": findings,
+            }
+        ],
+        "findings": findings,
+    }
+
+
 class TestRunEnvAudit(unittest.TestCase):
     def test_runner_green_in_advisory_mode(self):
         with mock.patch.object(run_env_audit.env_scope_checker, "generate_report", return_value=_scope_report()):
             with mock.patch.object(run_env_audit.env_wiring_checker, "generate_report", return_value=_wiring_report()):
-                exit_code, report = run_env_audit.generate_report(
-                    matrix_path="docs/env-scope-matrix.md",
-                    requested_vps="maincua",
-                    timeout_seconds=15,
-                    mode="advisory",
-                )
+                with mock.patch.object(run_env_audit.env_discovery_checker, "generate_report", return_value=_discovery_report()):
+                    exit_code, report = run_env_audit.generate_report(
+                        matrix_path="docs/env-scope-matrix.md",
+                        requested_vps="maincua",
+                        timeout_seconds=15,
+                        mode="advisory",
+                    )
         self.assertEqual(exit_code, 0)
         self.assertEqual(report["status"], "OK")
         self.assertEqual(report["finding_count"], 0)
         self.assertEqual(report["error_count"], 0)
+        self.assertEqual(report["checker_count"], 3)
 
     def test_runner_scope_finding_in_advisory_mode(self):
         with mock.patch.object(run_env_audit.env_scope_checker, "generate_report", return_value=_scope_report(status="DRIFT", finding_count=1)):
             with mock.patch.object(run_env_audit.env_wiring_checker, "generate_report", return_value=_wiring_report()):
-                exit_code, report = run_env_audit.generate_report(
-                    matrix_path="docs/env-scope-matrix.md",
-                    requested_vps="maincua",
-                    timeout_seconds=15,
-                    mode="advisory",
-                )
+                with mock.patch.object(run_env_audit.env_discovery_checker, "generate_report", return_value=_discovery_report()):
+                    exit_code, report = run_env_audit.generate_report(
+                        matrix_path="docs/env-scope-matrix.md",
+                        requested_vps="maincua",
+                        timeout_seconds=15,
+                        mode="advisory",
+                    )
         self.assertEqual(exit_code, 10)
         self.assertEqual(report["status"], "DRIFT")
         self.assertEqual(report["finding_count"], 1)
@@ -116,38 +156,55 @@ class TestRunEnvAudit(unittest.TestCase):
     def test_runner_wiring_finding_in_advisory_mode(self):
         with mock.patch.object(run_env_audit.env_scope_checker, "generate_report", return_value=_scope_report()):
             with mock.patch.object(run_env_audit.env_wiring_checker, "generate_report", return_value=_wiring_report(status="DRIFT", finding_count=1)):
-                exit_code, report = run_env_audit.generate_report(
-                    matrix_path="docs/env-scope-matrix.md",
-                    requested_vps="maincua",
-                    timeout_seconds=15,
-                    mode="advisory",
-                )
+                with mock.patch.object(run_env_audit.env_discovery_checker, "generate_report", return_value=_discovery_report()):
+                    exit_code, report = run_env_audit.generate_report(
+                        matrix_path="docs/env-scope-matrix.md",
+                        requested_vps="maincua",
+                        timeout_seconds=15,
+                        mode="advisory",
+                    )
         self.assertEqual(exit_code, 10)
         self.assertEqual(report["status"], "DRIFT")
         self.assertEqual(report["finding_count"], 1)
 
-    def test_runner_both_findings_accumulate(self):
+    def test_runner_discovery_finding_in_advisory_mode(self):
+        with mock.patch.object(run_env_audit.env_scope_checker, "generate_report", return_value=_scope_report()):
+            with mock.patch.object(run_env_audit.env_wiring_checker, "generate_report", return_value=_wiring_report()):
+                with mock.patch.object(run_env_audit.env_discovery_checker, "generate_report", return_value=_discovery_report(status="DRIFT", finding_count=1)):
+                    exit_code, report = run_env_audit.generate_report(
+                        matrix_path="docs/env-scope-matrix.md",
+                        requested_vps="maincua",
+                        timeout_seconds=15,
+                        mode="advisory",
+                    )
+        self.assertEqual(exit_code, 10)
+        self.assertEqual(report["status"], "DRIFT")
+        self.assertEqual(report["finding_count"], 1)
+
+    def test_runner_all_findings_accumulate(self):
         with mock.patch.object(run_env_audit.env_scope_checker, "generate_report", return_value=_scope_report(status="DRIFT", finding_count=1)):
             with mock.patch.object(run_env_audit.env_wiring_checker, "generate_report", return_value=_wiring_report(status="DRIFT", finding_count=1)):
-                exit_code, report = run_env_audit.generate_report(
-                    matrix_path="docs/env-scope-matrix.md",
-                    requested_vps="maincua",
-                    timeout_seconds=15,
-                    mode="advisory",
-                )
+                with mock.patch.object(run_env_audit.env_discovery_checker, "generate_report", return_value=_discovery_report(status="DRIFT", finding_count=1)):
+                    exit_code, report = run_env_audit.generate_report(
+                        matrix_path="docs/env-scope-matrix.md",
+                        requested_vps="maincua",
+                        timeout_seconds=15,
+                        mode="advisory",
+                    )
         self.assertEqual(exit_code, 10)
-        self.assertEqual(report["finding_count"], 2)
+        self.assertEqual(report["finding_count"], 3)
         self.assertEqual(report["vps_results"][0]["status"], "DRIFT")
 
     def test_runner_checker_error_returns_execution_error(self):
         with mock.patch.object(run_env_audit.env_scope_checker, "generate_report", side_effect=ValueError("bad scope spec")):
             with mock.patch.object(run_env_audit.env_wiring_checker, "generate_report", return_value=_wiring_report()):
-                exit_code, report = run_env_audit.generate_report(
-                    matrix_path="docs/env-scope-matrix.md",
-                    requested_vps="maincua",
-                    timeout_seconds=15,
-                    mode="advisory",
-                )
+                with mock.patch.object(run_env_audit.env_discovery_checker, "generate_report", return_value=_discovery_report()):
+                    exit_code, report = run_env_audit.generate_report(
+                        matrix_path="docs/env-scope-matrix.md",
+                        requested_vps="maincua",
+                        timeout_seconds=15,
+                        mode="advisory",
+                    )
         self.assertEqual(exit_code, 2)
         self.assertEqual(report["status"], "ERROR")
         self.assertEqual(report["error_count"], 1)
@@ -161,8 +218,8 @@ class TestRunEnvAudit(unittest.TestCase):
             "timestamp_utc": "2026-03-27T00:00:00+00:00",
             "matrix_path": "docs/env-scope-matrix.md",
             "selected_vps": ["maincua"],
-            "checker_count": 2,
-            "finding_count": 2,
+            "checker_count": 3,
+            "finding_count": 3,
             "error_count": 0,
             "exit_code": 10,
             "vps_results": [
@@ -173,6 +230,8 @@ class TestRunEnvAudit(unittest.TestCase):
                     "scope_finding_count": 1,
                     "wiring_status": "DRIFT",
                     "wiring_finding_count": 1,
+                    "discovery_status": "DRIFT",
+                    "discovery_finding_count": 1,
                 }
             ],
             "checkers": [
@@ -190,23 +249,33 @@ class TestRunEnvAudit(unittest.TestCase):
                     "error": "",
                     "report": _wiring_report(status="DRIFT", finding_count=1),
                 },
+                {
+                    "checker": "discovery",
+                    "status": "DRIFT",
+                    "finding_count": 1,
+                    "error": "",
+                    "report": _discovery_report(status="DRIFT", finding_count=1),
+                },
             ],
         }
         rendered = run_env_audit.render_report(report, "markdown")
         self.assertIn("# Env Audit", rendered)
         self.assertIn("scope=DRIFT", rendered)
+        self.assertIn("discovery=DRIFT", rendered)
         self.assertIn("checker=scope", rendered)
         self.assertIn("checker=wiring", rendered)
+        self.assertIn("checker=discovery", rendered)
 
     def test_strict_mode_preserves_drift_exit_code(self):
         with mock.patch.object(run_env_audit.env_scope_checker, "generate_report", return_value=_scope_report(status="DRIFT", finding_count=1)):
             with mock.patch.object(run_env_audit.env_wiring_checker, "generate_report", return_value=_wiring_report()):
-                exit_code, report = run_env_audit.generate_report(
-                    matrix_path="docs/env-scope-matrix.md",
-                    requested_vps="maincua",
-                    timeout_seconds=15,
-                    mode="strict",
-                )
+                with mock.patch.object(run_env_audit.env_discovery_checker, "generate_report", return_value=_discovery_report()):
+                    exit_code, report = run_env_audit.generate_report(
+                        matrix_path="docs/env-scope-matrix.md",
+                        requested_vps="maincua",
+                        timeout_seconds=15,
+                        mode="strict",
+                    )
         self.assertEqual(exit_code, 1)
         self.assertEqual(report["exit_code"], 1)
 
@@ -218,7 +287,7 @@ class TestRunEnvAudit(unittest.TestCase):
             "timestamp_utc": "2026-03-27T00:00:00+00:00",
             "matrix_path": "docs/env-scope-matrix.md",
             "selected_vps": ["maincua"],
-            "checker_count": 2,
+            "checker_count": 3,
             "finding_count": 0,
             "error_count": 0,
             "exit_code": 0,
@@ -239,7 +308,7 @@ class TestRunEnvAudit(unittest.TestCase):
             "timestamp_utc": "2026-03-27T00:00:00+00:00",
             "matrix_path": "docs/env-scope-matrix.md",
             "selected_vps": ["maincua"],
-            "checker_count": 2,
+            "checker_count": 3,
             "finding_count": 1,
             "error_count": 0,
             "exit_code": 10,

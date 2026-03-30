@@ -62,7 +62,7 @@ The wiring checker does not validate:
 - secret values
 - env-loading semantics outside the mapped static targets
 
-Recurring advisory audit for both layers is consolidated in:
+Recurring advisory audit for scope, wiring, and discovery is consolidated in:
 ```bash
 python3 tools/run_env_audit.py --vps maincua --mode advisory --report markdown
 ```
