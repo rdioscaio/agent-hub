@@ -46,6 +46,10 @@ This document is the source of truth for environment-file scope across the curre
 | `NEXT VPS` | `/home/rdios/agent-hub-mcp/.env` | `repo-local override` | repo-local overrides for `agent-hub-mcp` | no | repo-local startup only | do not duplicate `MANUS_API_KEY`, `HCLOUD_TOKEN`, or other shared secrets here |
 | `NEXT VPS` | `/etc/agent-hub-mcp/server_sse.env` | `service-local` | SSE runtime config | yes | `agent-hub-sse.service` | keep `HUB_DB_PATH`, `MCP_SSE_HOST`, `MCP_SSE_PORT`, `MCP_SSE_ALLOW_PUBLIC_BIND`, optional `HCLOUD_TOKEN` |
 | `NEXT VPS` | `/etc/systemd/system/agent-hub-sse.service` | `service-local` | SSE unit definition | yes | systemd | keep service wiring only; load shared secrets through `EnvironmentFile` |
+| `NEXT VPS` | `/etc/nextcloud-backup/heartbeat.env` | `service-local` | Nextcloud heartbeat monitor thresholds and local paths | yes | `nextcloud-heartbeat-monitor.service` | keep monitor targets, thresholds, and local path settings only |
+| `NEXT VPS` | `/etc/nextcloud-backup/notify.env` | `service-local` | Nextcloud alert delivery and fan-out settings | yes | backup/heartbeat alert scripts on `NEXT VPS` | keep webhook endpoints, timeout, and fan-out settings only |
+| `NEXT VPS` | `/etc/nextcloud-backup/offsite.env` | `service-local` | Nextcloud offsite sync and drill settings | yes | offsite sync and restore drill flows on `NEXT VPS` | keep offsite target, retention, and path settings only |
+| `NEXT VPS` | `/etc/systemd/system/nextcloud-heartbeat-monitor.service` | `service-local` | Nextcloud heartbeat monitor unit | yes | systemd | keep `/etc/nextcloud-backup/heartbeat.env` as the only `EnvironmentFile` |
 | `NEXT VPS` | `/home/rdios/ENVIRONMENT.md` | `documentation` | host-local operational contract | yes | operators and agents | every file path in this document must remain prefixed with `NEXT VPS` context |
 
 ### MAINCUA VPS
@@ -58,6 +62,10 @@ This document is the source of truth for environment-file scope across the curre
 | `MAINCUA VPS` | `/home/rdios/cua/.env` | `service-local` | local routing settings for `cua` | no | `cua` runtime | keep listener and routing settings only |
 | `MAINCUA VPS` | `/home/rdios/gateway/.env` | `service-local` | local listener settings for legacy gateway | no | legacy gateway entrypoints | keep listener and local toggles only |
 | `MAINCUA VPS` | `/etc/systemd/system/gateway.service.d/10-env.conf` | `service-local` | adds `EnvironmentFile` order for `gateway.service` | yes | `gateway.service` | keep loading `/home/rdios/.env` before `/home/rdios/cua/config/.env` |
+| `MAINCUA VPS` | `/etc/protocolo/protocolo.env` | `app-local` | deployed `spa-renata-protocolos` backend runtime and auth settings | yes | `protocolo-backend.service` | keep local to the deployed backend surface |
+| `MAINCUA VPS` | `/etc/systemd/system/protocolo-backend.service` | `service-local` | deployed `spa-renata-protocolos` backend unit | yes | systemd | keep `/etc/protocolo/protocolo.env` as the only `EnvironmentFile` |
+| `MAINCUA VPS` | `/etc/sentinel-gateway.env` | `app-local` | Sentinel gateway token and runtime path settings | yes | `sentinel-gateway.service` | keep local to the sentinel gateway surface |
+| `MAINCUA VPS` | `/etc/systemd/system/sentinel-gateway.service` | `service-local` | Sentinel gateway unit | yes | systemd | keep `/etc/sentinel-gateway.env` as the only `EnvironmentFile` |
 | `MAINCUA VPS` | `/home/rdios/apps/nummus-auto-backend/.env` | `app-local` | app-specific runtime and provider key | yes | `nummus-auto-backend` | do not centralize into `/home/rdios/.env` while its provider key differs from `CUA/Gateway` |
 | `MAINCUA VPS` | `/home/rdios/cua/n8n/.env` | `app-local` | n8n runtime and integration keys | yes | `n8n` container/runtime | do not centralize into `/home/rdios/.env` while its Gemini key differs from `CUA/Gateway` |
 | `MAINCUA VPS` | `/home/rdios/apps/spa-renata-protocolos/.env` | `app-local` | app-specific runtime and secrets | yes | `spa-renata-protocolos` | keep local unless explicitly refactored |
@@ -95,12 +103,27 @@ This document is the source of truth for environment-file scope across the curre
 | `HUB VPS` | `agent-hub-sse.service` | `systemd-unit` | `/etc/systemd/system/agent-hub-sse.service` | `EnvironmentFile=-/home/rdios/.env` | change only if the service load order changes |
 | `HUB VPS` | `run-agent-hub-mcp.py` | `path-patterns` | `/home/rdios/.claude/run-agent-hub-mcp.py` | load `/home/rdios/.env` before repo `.env` | load `/home/rdios/.env` before repo `.env` |
 | `NEXT VPS` | `agent-hub-sse.service` | `systemd-unit` | `/etc/systemd/system/agent-hub-sse.service` | `EnvironmentFile=-/home/rdios/.env` then `/etc/agent-hub-mcp/server_sse.env` | keep `/home/rdios/.env` before `/etc/agent-hub-mcp/server_sse.env` |
+| `NEXT VPS` | `nextcloud-heartbeat-monitor.service` | `systemd-unit` | `/etc/systemd/system/nextcloud-heartbeat-monitor.service` | `EnvironmentFile=-/etc/nextcloud-backup/heartbeat.env` | keep `/etc/nextcloud-backup/heartbeat.env` as the only `EnvironmentFile` |
 | `MAINCUA VPS` | `gateway.service` | `systemd-unit` | `/etc/systemd/system/gateway.service` | `EnvironmentFile=-/home/rdios/.env` then `/home/rdios/cua/config/.env` | keep loading `/home/rdios/.env` before `/home/rdios/cua/config/.env` |
+| `MAINCUA VPS` | `protocolo-backend.service` | `systemd-unit` | `/etc/systemd/system/protocolo-backend.service` | `EnvironmentFile=/etc/protocolo/protocolo.env` | keep `/etc/protocolo/protocolo.env` as the only `EnvironmentFile` |
+| `MAINCUA VPS` | `sentinel-gateway.service` | `systemd-unit` | `/etc/systemd/system/sentinel-gateway.service` | `EnvironmentFile=/etc/sentinel-gateway.env` | keep `/etc/sentinel-gateway.env` as the only `EnvironmentFile` |
 | `MAINCUA VPS` | `maincua.env symlink` | `symlink` | `/opt/secrets/maincua.env` | resolve to `/home/rdios/cua/config/.env` | may point only to `MAINCUA VPS /home/rdios/cua/config/.env` |
 | `MAINCUA VPS` | `gateway/config.py` | `path-patterns` | `/home/rdios/gateway/config.py` | reference `/opt/secrets/maincua.env` and `load_dotenv(SECRETS_FILE)` | keep `/opt/secrets/maincua.env` as the first shared secrets path |
 | `MAINCUA VPS` | `cua/agent_main.py` | `path-patterns` | `/home/rdios/cua/agent_main.py` | build `CONFIG_DIR/.env` and call `load_dotenv(dotenv_path=ENV_PATH)` | keep loading `CONFIG_DIR/.env` explicitly via `load_dotenv` |
+| `MAINCUA VPS` | `n8n compose override` | `compose-env-file` | `/home/rdios/cua/n8n/docker-compose.override.yml` | service `n8n` uses `env_file: [./.env]` | keep `./.env` as the compose `env_file` for `n8n` override |
+| `MAINCUA VPS` | `spa-renata compose` | `compose-env-file` | `/home/rdios/apps/spa-renata-protocolos/docker/docker-compose.yml` | service `app` uses `env_file: [../.env]` | keep `../.env` as the compose `env_file` for the active `spa-renata` stack |
 | `MAINCUA VPS` | `evolution_api compose` | `compose-env-file` | `/home/rdios/evolution-api/docker-compose.yaml` | service `evolution_api` uses `env_file: [.env]` | keep `.env` as the compose `env_file` for `evolution_api` |
 | `MAINCUA VPS` | `kommo-gateway.service` | `systemd-unit` | `/etc/systemd/system/kommo-gateway.service` | `EnvironmentFile=/home/rdios/kommo-gateway/.env` | keep `/home/rdios/kommo-gateway/.env` as the only `EnvironmentFile` |
+
+## Discovery Exclusions
+
+The following paths are intentionally outside the current env-audit contract until they become active deployment surfaces:
+
+| VPS | Path / Pattern | Reason |
+|---|---|---|
+| `MAINCUA VPS` | `/home/rdios/apps/spa-renata-protocolos/client/*` | client compose path is present on disk, but `client/.env` is absent and the active runtime comes from `/home/rdios/apps/spa-renata-protocolos/docker/docker-compose.yml` |
+| `MAINCUA VPS` | `/home/rdios/apps/agente-musica/*` | compose file exists on disk, but there is no running container from this stack and it is not part of the current active env-audit surface |
+| `MAINCUA VPS` | `/home/rdios/evolution-api/docker-compose.dev.yaml` | development-only compose variant; the active runtime is `/home/rdios/evolution-api/docker-compose.yaml` |
 
 ## Checker Spec
 
@@ -169,11 +192,15 @@ This document is the source of truth for environment-file scope across the curre
       },
       "discovery": {
         "paths": [
-          "/home/rdios/.env"
+          "/home/rdios/.env",
+          "/etc/nextcloud-backup/heartbeat.env",
+          "/etc/nextcloud-backup/notify.env",
+          "/etc/nextcloud-backup/offsite.env"
         ],
         "roots": [
           "/home/rdios/agent-hub-mcp",
-          "/etc/agent-hub-mcp"
+          "/etc/agent-hub-mcp",
+          "/etc/nextcloud-backup"
         ],
         "ignore_globs": []
       },
@@ -214,12 +241,80 @@ This document is the source of truth for environment-file scope across the curre
             "MCP_SSE_PORT",
             "MCP_SSE_ALLOW_PUBLIC_BIND"
           ],
+            "allowed_vars": [
+              "HUB_DB_PATH",
+              "MCP_SSE_HOST",
+              "MCP_SSE_PORT",
+              "MCP_SSE_ALLOW_PUBLIC_BIND",
+              "HCLOUD_TOKEN"
+            ]
+        },
+        {
+          "path": "/etc/nextcloud-backup/heartbeat.env",
+          "scope": "service-local",
+          "mutation_rule": "keep monitor targets, thresholds, and local path settings only",
+          "strict_allowlist": true,
+          "required_vars": [
+            "MONITOR_TARGETS",
+            "HEARTBEAT_MAX_AGE_SECONDS",
+            "HEARTBEAT_START_GRACE_SECONDS",
+            "EVENT_ROOT",
+            "STATE_ROOT",
+            "NOTIFY_BIN"
+          ],
           "allowed_vars": [
-            "HUB_DB_PATH",
-            "MCP_SSE_HOST",
-            "MCP_SSE_PORT",
-            "MCP_SSE_ALLOW_PUBLIC_BIND",
-            "HCLOUD_TOKEN"
+            "MONITOR_TARGETS",
+            "HEARTBEAT_MAX_AGE_SECONDS",
+            "HEARTBEAT_START_GRACE_SECONDS",
+            "EVENT_ROOT",
+            "STATE_ROOT",
+            "NOTIFY_BIN"
+          ]
+        },
+        {
+          "path": "/etc/nextcloud-backup/notify.env",
+          "scope": "service-local",
+          "mutation_rule": "keep webhook endpoints, timeout, and fan-out settings only",
+          "strict_allowlist": true,
+          "required_vars": [
+            "WEBHOOK_TIMEOUT_SECONDS",
+            "WEBHOOK_URL"
+          ],
+          "allowed_vars": [
+            "SECONDARY_WEBHOOK_CLICK_URL",
+            "SECONDARY_WEBHOOK_MODE",
+            "SECONDARY_WEBHOOK_TOPIC",
+            "SECONDARY_WEBHOOK_URL",
+            "WEBHOOK_TIMEOUT_SECONDS",
+            "WEBHOOK_URL"
+          ]
+        },
+        {
+          "path": "/etc/nextcloud-backup/offsite.env",
+          "scope": "service-local",
+          "mutation_rule": "keep offsite target, retention, and path settings only",
+          "strict_allowlist": true,
+          "required_vars": [
+            "ALERT_ROOT",
+            "DRILL_ROOT",
+            "OFFSITE_HOST",
+            "OFFSITE_KEEP_COUNT",
+            "OFFSITE_ROOT",
+            "OFFSITE_USER",
+            "REPORT_KEEP_DAYS",
+            "SNAPSHOT_ROOT",
+            "SSH_KEY"
+          ],
+          "allowed_vars": [
+            "ALERT_ROOT",
+            "DRILL_ROOT",
+            "OFFSITE_HOST",
+            "OFFSITE_KEEP_COUNT",
+            "OFFSITE_ROOT",
+            "OFFSITE_USER",
+            "REPORT_KEEP_DAYS",
+            "SNAPSHOT_ROOT",
+            "SSH_KEY"
           ]
         }
       ]
@@ -229,11 +324,14 @@ This document is the source of truth for environment-file scope across the curre
       "label": "MAINCUA VPS",
       "access": {
         "mode": "ssh",
-        "host_alias": "maincua-prod"
+        "host_alias": "maincua-prod",
+        "sudo": true
       },
       "discovery": {
         "paths": [
-          "/home/rdios/.env"
+          "/home/rdios/.env",
+          "/etc/protocolo/protocolo.env",
+          "/etc/sentinel-gateway.env"
         ],
         "roots": [
           "/home/rdios/cua",
@@ -246,8 +344,11 @@ This document is the source of truth for environment-file scope across the curre
           "/opt/secrets"
         ],
         "ignore_globs": [
+          "/home/rdios/apps/agente-musica/*",
+          "/home/rdios/apps/spa-renata-protocolos/client/*",
           "/home/rdios/apps/*/node_modules/*",
-          "/home/rdios/apps/*/.next/*"
+          "/home/rdios/apps/*/.next/*",
+          "/home/rdios/evolution-api/docker-compose.dev.yaml"
         ]
       },
       "files": [
@@ -352,6 +453,42 @@ This document is the source of truth for environment-file scope across the curre
               "GATEWAY_PORT",
               "HOST",
               "PORT"
+            ]
+          },
+          {
+            "path": "/etc/protocolo/protocolo.env",
+            "scope": "app-local",
+            "mutation_rule": "keep local to the deployed backend surface",
+            "strict_allowlist": true,
+            "required_vars": [
+              "APP_BASE_URL",
+              "JWT_SECRET",
+              "PORT"
+            ],
+            "allowed_vars": [
+              "APP_BASE_URL",
+              "AUTH_STRATEGY",
+              "JWT_SECRET",
+              "NODE_ENV",
+              "PORT",
+              "SEED_ADMIN_PASSWORD",
+              "SEED_SUPERADMIN_EMAIL"
+            ]
+          },
+          {
+            "path": "/etc/sentinel-gateway.env",
+            "scope": "app-local",
+            "mutation_rule": "keep local to the sentinel gateway surface",
+            "strict_allowlist": true,
+            "required_vars": [
+              "GATEWAY_PY",
+              "GATEWAY_TOKEN",
+              "GATEWAY_WORKDIR"
+            ],
+            "allowed_vars": [
+              "GATEWAY_PY",
+              "GATEWAY_TOKEN",
+              "GATEWAY_WORKDIR"
             ]
           },
           {
@@ -593,6 +730,16 @@ This document is the source of truth for environment-file scope across the curre
             "-/home/rdios/.env",
             "/etc/agent-hub-mcp/server_sse.env"
           ]
+        },
+        {
+          "name": "nextcloud-heartbeat-monitor.service",
+          "kind": "systemd-unit",
+          "path": "/etc/systemd/system/nextcloud-heartbeat-monitor.service",
+          "mutation_rule": "keep `/etc/nextcloud-backup/heartbeat.env` as the only `EnvironmentFile`",
+          "service_name": "nextcloud-heartbeat-monitor.service",
+          "expected_environment_files": [
+            "-/etc/nextcloud-backup/heartbeat.env"
+          ]
         }
       ]
     },
@@ -601,7 +748,8 @@ This document is the source of truth for environment-file scope across the curre
       "label": "MAINCUA VPS",
       "access": {
         "mode": "ssh",
-        "host_alias": "maincua-prod"
+        "host_alias": "maincua-prod",
+        "sudo": true
       },
       "targets": [
         {
@@ -613,6 +761,26 @@ This document is the source of truth for environment-file scope across the curre
           "expected_environment_files": [
             "-/home/rdios/.env",
             "/home/rdios/cua/config/.env"
+          ]
+        },
+        {
+          "name": "protocolo-backend.service",
+          "kind": "systemd-unit",
+          "path": "/etc/systemd/system/protocolo-backend.service",
+          "mutation_rule": "keep `/etc/protocolo/protocolo.env` as the only `EnvironmentFile`",
+          "service_name": "protocolo-backend.service",
+          "expected_environment_files": [
+            "/etc/protocolo/protocolo.env"
+          ]
+        },
+        {
+          "name": "sentinel-gateway.service",
+          "kind": "systemd-unit",
+          "path": "/etc/systemd/system/sentinel-gateway.service",
+          "mutation_rule": "keep `/etc/sentinel-gateway.env` as the only `EnvironmentFile`",
+          "service_name": "sentinel-gateway.service",
+          "expected_environment_files": [
+            "/etc/sentinel-gateway.env"
           ]
         },
         {
@@ -641,6 +809,26 @@ This document is the source of truth for environment-file scope across the curre
             "CONFIG_DIR = os.path.join(CUA_DIR, \"config\")",
             "ENV_PATH = os.path.join(CONFIG_DIR, \".env\")",
             "load_dotenv(dotenv_path=ENV_PATH)"
+          ]
+        },
+        {
+          "name": "n8n compose override",
+          "kind": "compose-env-file",
+          "path": "/home/rdios/cua/n8n/docker-compose.override.yml",
+          "mutation_rule": "keep `./.env` as the compose `env_file` for `n8n` override",
+          "service_name": "n8n",
+          "expected_environment_files": [
+            "./.env"
+          ]
+        },
+        {
+          "name": "spa-renata compose",
+          "kind": "compose-env-file",
+          "path": "/home/rdios/apps/spa-renata-protocolos/docker/docker-compose.yml",
+          "mutation_rule": "keep `../.env` as the compose `env_file` for the active `spa-renata` stack",
+          "service_name": "app",
+          "expected_environment_files": [
+            "../.env"
           ]
         },
         {
