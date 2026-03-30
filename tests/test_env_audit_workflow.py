@@ -47,6 +47,17 @@ class TestEnvAuditWorkflow(unittest.TestCase):
         self.assertIn("- `10`: advisory warning, review required, no hard gate", text)
         self.assertIn("- `2`: execution error, treat as failure", text)
 
+    def test_workflow_summary_by_vps_line_includes_all_checker_fields(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("### By VPS", text)
+        self.assertIn(
+            "f\"- `{item['vps']}`: status=`{item['status']}` "
+            "scope=`{item['scope_status']}` "
+            "wiring=`{item['wiring_status']}` "
+            "discovery=`{item['discovery_status']}`\"",
+            text,
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
