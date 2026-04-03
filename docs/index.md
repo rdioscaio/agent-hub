@@ -15,6 +15,8 @@ This directory is the canonical entry point for project documentation.
   - current MCP entry points and exact tool surfaces
 - `docs/sse-deployment.md`
   - explicit bind-safety and deployment contract for `server_sse.py`
+- `docs/claude-review-worker.md`
+  - deterministic review-worker contract for `claude-backend` queue consumption
 - `deploy/caddy/agent-hub-sse.Caddyfile.example`
   - concrete reference proxy config for the SSE surface
 - `deploy/systemd/agent-hub-sse.service.example`

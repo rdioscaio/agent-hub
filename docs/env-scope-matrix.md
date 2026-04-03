@@ -33,10 +33,12 @@ This document is the source of truth for environment-file scope across the curre
 
 | VPS | File | Scope | Current role | Source of truth | Consumers | Mutation rule |
 |---|---|---|---|---|---|---|
-| `HUB VPS` | `/home/rdios/.env` | `host-shared` | shared secrets and infrastructure tokens | yes | bash sessions, local wrappers, `agent-hub-sse.service` via systemd drop-in | add only host-shared, non-conflicting values |
+| `HUB VPS` | `/home/rdios/.env` | `host-shared` | shared secrets and infrastructure tokens | yes | bash sessions, local wrappers, `agent-hub-sse.service`, `agent-hub-claude-reviewer.service` | add only host-shared, non-conflicting values |
 | `HUB VPS` | `/home/rdios/agent-hub-mcp/.env` | `repo-local override` | repo-local overrides for `agent-hub-mcp` | no | local repo startup paths | keep `HUB_DB_PATH` or other repo-local overrides only |
 | `HUB VPS` | `/etc/systemd/system/agent-hub-sse.service.d/10-env.conf` | `service-local` | injects `EnvironmentFile=-/home/rdios/.env` into `agent-hub-sse.service` | yes | `agent-hub-sse.service` | change only if the service load order changes |
 | `HUB VPS` | `/etc/systemd/system/agent-hub-sse.service` | `service-local` | SSE unit definition | yes | systemd | keep unit concerns only; do not inline secrets |
+| `HUB VPS` | `/etc/systemd/system/agent-hub-claude-reviewer.service` | `service-local` | reviewer worker unit definition | yes | systemd | keep `/home/rdios/.env` as the only `EnvironmentFile`; keep runtime cost controls in `ExecStart` |
+| `HUB VPS` | `/etc/systemd/system/agent-hub-claude-reviewer.timer` | `service-local` | reviewer worker schedule | yes | systemd | keep cadence and binding to `agent-hub-claude-reviewer.service` only |
 
 ### NEXT VPS
 
@@ -101,6 +103,7 @@ This document is the source of truth for environment-file scope across the curre
 | VPS | Target | Kind | Path | Expected wiring | Mutation rule |
 |---|---|---|---|---|---|
 | `HUB VPS` | `agent-hub-sse.service` | `systemd-unit` | `/etc/systemd/system/agent-hub-sse.service` | `EnvironmentFile=-/home/rdios/.env` | change only if the service load order changes |
+| `HUB VPS` | `agent-hub-claude-reviewer.service` | `systemd-unit` | `/etc/systemd/system/agent-hub-claude-reviewer.service` | `EnvironmentFile=-/home/rdios/.env` | keep `/home/rdios/.env` as the only `EnvironmentFile`; keep runtime cost controls in `ExecStart` |
 | `HUB VPS` | `run-agent-hub-mcp.py` | `path-patterns` | `/home/rdios/.claude/run-agent-hub-mcp.py` | load `/home/rdios/.env` before repo `.env` | load `/home/rdios/.env` before repo `.env` |
 | `NEXT VPS` | `agent-hub-sse.service` | `systemd-unit` | `/etc/systemd/system/agent-hub-sse.service` | `EnvironmentFile=-/home/rdios/.env` then `/etc/agent-hub-mcp/server_sse.env` | keep `/home/rdios/.env` before `/etc/agent-hub-mcp/server_sse.env` |
 | `NEXT VPS` | `nextcloud-heartbeat-monitor.service` | `systemd-unit` | `/etc/systemd/system/nextcloud-heartbeat-monitor.service` | `EnvironmentFile=-/etc/nextcloud-backup/heartbeat.env` | keep `/etc/nextcloud-backup/heartbeat.env` as the only `EnvironmentFile` |
@@ -693,6 +696,16 @@ The following paths are intentionally outside the current env-audit contract unt
           "path": "/etc/systemd/system/agent-hub-sse.service",
           "mutation_rule": "change only if the service load order changes",
           "service_name": "agent-hub-sse.service",
+          "expected_environment_files": [
+            "-/home/rdios/.env"
+          ]
+        },
+        {
+          "name": "agent-hub-claude-reviewer.service",
+          "kind": "systemd-unit",
+          "path": "/etc/systemd/system/agent-hub-claude-reviewer.service",
+          "mutation_rule": "keep `/home/rdios/.env` as the only `EnvironmentFile`; keep runtime cost controls in `ExecStart`",
+          "service_name": "agent-hub-claude-reviewer.service",
           "expected_environment_files": [
             "-/home/rdios/.env"
           ]

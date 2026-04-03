@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Hub Claude backend review worker
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/home/rdios/agent-hub-mcp/scripts/run_claude_review_worker.py
+
+[Service]
+Type=oneshot
+User=rdios
+Group=rdios
+WorkingDirectory=/home/rdios/agent-hub-mcp
+EnvironmentFile=-/home/rdios/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/rdios/agent-hub-mcp/scripts/run_claude_review_worker.py --owner claude-backend --requested-agent claude-backend --model sonnet --effort low --max-budget-usd 0.20
+UMask=027
+StandardOutput=journal
+StandardError=journal
