@@ -1,0 +1,270 @@
+[
+  {
+    "id": "agenda-ingest-001",
+    "name": "Agenda Ingest - Appointments Read",
+    "active": true,
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "agenda-ingest-trigger",
+          "authentication": "headerAuth",
+          "options": {}
+        },
+        "id": "trigger-wh",
+        "name": "Webhook Trigger",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          200,
+          300
+        ],
+        "webhookId": "agenda-ingest-trigger",
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "execSecretHdr",
+            "name": "Command Executor Secret"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "SELECT key, value FROM automation_config WHERE key LIKE 'appointments_%';"
+        },
+        "id": "pg-load-config",
+        "name": "Load Config",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          420,
+          300
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "pgApiErp001",
+            "name": "Postgres api_erp"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const rows = $input.all().map(i => i.json);\nconst cfg = {};\nfor (const r of rows) cfg[r.key] = r.value;\nconst d = new Date(); const runDate = d.toISOString().slice(0, 10);\nreturn [{ json: { _config: cfg, _runDate: runDate } }];"
+        },
+        "id": "code-parse-config",
+        "name": "Parse Config",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          640,
+          300
+        ]
+      },
+      {
+        "parameters": {
+          "url": "=https://production.gracesonline.com.br/gracesApi2/base/agenda/GetColaboradoresPorEmpresa/?idFranquia=37767d6e-810c-4465-bdfe-988231ea7dcf&idLoja=bf85c894-09c2-4122-b9fc-29efc20d2e2a&dataIni={{ $('Parse Config').item.json._runDate }}&dataFim={{ $('Parse Config').item.json._runDate }}",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpBearerAuth",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "accept",
+                "value": "application/json, text/plain, */*"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              },
+              {
+                "name": "idfranquia",
+                "value": "37767d6e-810c-4465-bdfe-988231ea7dcf"
+              },
+              {
+                "name": "idloja",
+                "value": "bf85c894-09c2-4122-b9fc-29efc20d2e2a"
+              },
+              {
+                "name": "referer",
+                "value": "https://production.gracesonline.com.br/sistema/operacao/agenda"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            },
+            "timeout": 30000
+          }
+        },
+        "id": "http-agenda-read",
+        "name": "ERP Agenda Read",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          880,
+          300
+        ],
+        "credentials": {
+          "httpBearerAuth": {
+            "id": "erpBearerAuth",
+            "name": "Graces ERP Bearer"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const cfg = $('Parse Config').first().json._config || {};\nconst runDate = $('Parse Config').first().json._runDate;\nconst first = $input.first().json; const cols = Array.isArray(first) ? first : $input.all().map(i => i.json);\nconst byId = new Map();\nconst sqlText = (v) => (v === null || v === undefined || v === '') ? 'NULL' : \"'\" + String(v).replace(/'/g, \"''\") + \"'\";\nconst mapStatus = (name, excluido) => {\n  const n = (name || '').toLowerCase();\n  if (excluido || n.includes('anulada')) return 'cancelled';\n  if (n === 'confirmado' || n === 'na casa') return 'confirmed';\n  if (n === 'atendido' || n === 'executado') return 'completed';\n  if (n === 'prof. faltou' || n === 'prof. ausente' || n === 'falta') return 'failed';\n  if (n === 'a confirmar' || n === 'não confirmado' || n === 'nao confirmado') return 'pending';\n  return 'pending';\n};\nconst mapConfirmation = (name, status) => {\n  const n = (name || '').toLowerCase();\n  if (n === 'confirmado' || n === 'na casa' || n === 'atendido' || n === 'executado') return 'confirmed';\n  if (n === 'não confirmado' || n === 'nao confirmado' || status === 'failed' || status === 'cancelled') return 'rejected';\n  if (n === 'a confirmar') return 'not_sent';\n  return cfg.appointments_initial_confirmation_status || 'not_sent';\n};\nfor (const col of cols) {\n  for (const ag of (col.agendamentos || [])) {\n    const externalId = ag.idAgenda;\n    const start = ag.horaInicio || null;\n    if (!externalId || !start || start.slice(0, 10) !== runDate) continue;\n    if (byId.has(externalId)) continue;\n    const rawName = (ag.statusAgenda && ag.statusAgenda.nome) || null;\n    const status = mapStatus(rawName, ag.excluido);\n    const confirmationStatus = mapConfirmation(rawName, status);\n    const rawPayload = {\n      collaborator: { idColaboradorEmpresa: col.idColaboradorEmpresa || null, apelido: col.apelido || null, idCargo: col.idCargo || null },\n      appointment: ag,\n      runDate,\n    };\n    byId.set(externalId, {\n      source_system: 'graces_agenda',\n      external_appointment_id: externalId,\n      contact_id: null,\n      lead_id: null,\n      scheduled_start: start,\n      scheduled_end: ag.horaFim || null,\n      status,\n      confirmation_status: confirmationStatus,\n      idempotency_key: `graces_agenda:${externalId}`,\n      service_code: ag.idProdutoServico || null,\n      service_name: ag.nomeServico || ag.descricao || null,\n      unit_code: 'bf85c894-09c2-4122-b9fc-29efc20d2e2a',\n      professional_code: col.idColaboradorEmpresa || ag.idColaboradorEmpresa || null,\n      professional_name: col.apelido || null,\n      client_name: ag.nomeCliente || null,\n      external_client_id: ag.idCliente || null,\n      external_order_id: ag.idComanda || null,\n      raw_status_name: rawName,\n      raw_payload: rawPayload,\n      followup_enabled: cfg.appointments_followup_enabled === true,\n      sql_source_system: sqlText('graces_agenda'),\n      sql_external_appointment_id: sqlText(externalId),\n      sql_service_code: sqlText(ag.idProdutoServico || null),\n      sql_service_name: sqlText(ag.nomeServico || ag.descricao || null),\n      sql_unit_code: sqlText('bf85c894-09c2-4122-b9fc-29efc20d2e2a'),\n      sql_professional_code: sqlText(col.idColaboradorEmpresa || ag.idColaboradorEmpresa || null),\n      sql_scheduled_start: sqlText(start),\n      sql_scheduled_end: sqlText(ag.horaFim || null),\n      sql_status: sqlText(status),\n      sql_confirmation_status: sqlText(confirmationStatus),\n      sql_idempotency_key: sqlText(`graces_agenda:${externalId}`),\n      sql_client_name: sqlText(ag.nomeCliente || null),\n      sql_raw_status_name: sqlText(rawName),\n      sql_followup_enabled: cfg.appointments_followup_enabled === true ? 'true' : 'false',\n      _safePayload: JSON.stringify(rawPayload).replace(/'/g, \"''\")\n    });\n  }\n}\nreturn Array.from(byId.values()).map(v => ({ json: v }));"
+        },
+        "id": "code-prepare",
+        "name": "Prepare Appointments",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1120,
+          300
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "WITH upsert AS (\n  INSERT INTO appointments (\n    source_system, external_appointment_id, contact_id, lead_id, service_code, service_name, unit_code, professional_code, scheduled_start, scheduled_end, status, confirmation_status, idempotency_key, raw_payload\n  ) VALUES (\n    {{ $json.sql_source_system }},\n    {{ $json.sql_external_appointment_id }},\n    NULL,\n    NULL,\n    {{ $json.sql_service_code }},\n    {{ $json.sql_service_name }},\n    {{ $json.sql_unit_code }},\n    {{ $json.sql_professional_code }},\n    {{ $json.sql_scheduled_start }}::timestamptz,\n    {{ $json.sql_scheduled_end }}::timestamptz,\n    {{ $json.sql_status }},\n    {{ $json.sql_confirmation_status }},\n    {{ $json.sql_idempotency_key }},\n    '{{ $json._safePayload }}'::jsonb\n  )\n  ON CONFLICT (source_system, external_appointment_id) DO UPDATE SET\n    service_code = EXCLUDED.service_code,\n    service_name = EXCLUDED.service_name,\n    unit_code = EXCLUDED.unit_code,\n    professional_code = EXCLUDED.professional_code,\n    scheduled_start = EXCLUDED.scheduled_start,\n    scheduled_end = EXCLUDED.scheduled_end,\n    status = EXCLUDED.status,\n    confirmation_status = EXCLUDED.confirmation_status,\n    idempotency_key = EXCLUDED.idempotency_key,\n    raw_payload = EXCLUDED.raw_payload,\n    updated_at = now()\n  RETURNING id, source_system, external_appointment_id, status, confirmation_status, idempotency_key, scheduled_start\n), audit AS (\n  INSERT INTO audit_events (actor_type, actor_id, event_type, entity_type, entity_id, details_json)\n  SELECT 'n8n_workflow', 'agenda-ingest-001', 'appointment_ingested', 'appointments', upsert.id,\n    json_build_object('workflow', 'Agenda Ingest - Appointments Read', 'source_system', upsert.source_system, 'external_appointment_id', upsert.external_appointment_id, 'status', upsert.status, 'confirmation_status', upsert.confirmation_status, 'idempotency_key', upsert.idempotency_key, 'client_name', {{ $json.sql_client_name }}, 'source_status_name', {{ $json.sql_raw_status_name }}, 'scheduled_start', upsert.scheduled_start::text)::jsonb\n  FROM upsert\n  RETURNING id\n)\nSELECT upsert.id, upsert.source_system, upsert.external_appointment_id, upsert.status, upsert.confirmation_status, upsert.idempotency_key, upsert.scheduled_start, {{ $json.sql_client_name }} AS client_name, {{ $json.sql_service_name }} AS service_name, {{ $json.sql_raw_status_name }} AS raw_status_name, {{ $json.sql_followup_enabled }}::boolean AS followup_enabled, audit.id AS audit_id FROM upsert, audit;"
+        },
+        "id": "pg-upsert",
+        "name": "Upsert Appointment",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          1360,
+          300
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "pgApiErp001",
+            "name": "Postgres api_erp"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const items = $input.all().map(i => i.json);\nconst eligible = items.filter(i => i.followup_enabled && i.confirmation_status === 'not_sent');\nif (!eligible.length) return [];\neligible.sort((a, b) => new Date(a.scheduled_start) - new Date(b.scheduled_start));\nconst first = eligible[0];\nconst payload = {\n  should_fail: false,\n  workflow_action: 'send_confirmation_followup',\n  appointment_id: first.id,\n  external_appointment_id: first.external_appointment_id,\n  scheduled_start: first.scheduled_start,\n  status: first.status,\n  confirmation_status: first.confirmation_status,\n  client_name: first.client_name,\n  service_name: first.service_name,\n  raw_status_name: first.raw_status_name,\n};\nconst idempotencyKey = `appointment-followup:${first.external_appointment_id}`;\nreturn [{ json: {\n  command_type: 'local_noop_success',\n  target_system: 'local',\n  entity_type: 'appointments',\n  entity_id: first.id,\n  external_appointment_id: first.external_appointment_id,\n  idempotency_key: idempotencyKey,\n  _safePayload: JSON.stringify(payload).replace(/'/g, \"''\"),\n  _safeIdempotencyKey: idempotencyKey.replace(/'/g, \"''\"),\n  _safeExternalAppointmentId: String(first.external_appointment_id).replace(/'/g, \"''\"),\n} }];"
+        },
+        "id": "code-followup",
+        "name": "Build Followup Command",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1600,
+          300
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "WITH enqueue AS (\n  INSERT INTO command_queue (command_type, target_system, entity_type, entity_id, payload_json, idempotency_key, created_by)\n  VALUES ('{{ $json.command_type }}', '{{ $json.target_system }}', '{{ $json.entity_type }}', '{{ $json.entity_id }}'::uuid, '{{ $json._safePayload }}'::jsonb, '{{ $json._safeIdempotencyKey }}', 'agenda-ingest-001')\n  ON CONFLICT (idempotency_key) DO NOTHING\n  RETURNING id, idempotency_key, status\n), audit AS (\n  INSERT INTO audit_events (actor_type, actor_id, event_type, entity_type, entity_id, details_json)\n  SELECT 'n8n_workflow', 'agenda-ingest-001', 'appointment_followup_enqueued', 'command_queue', enqueue.id,\n    json_build_object('workflow_action', 'send_confirmation_followup', 'command_type', '{{ $json.command_type }}', 'external_appointment_id', '{{ $json._safeExternalAppointmentId }}', 'idempotency_key', '{{ $json._safeIdempotencyKey }}')::jsonb\n  FROM enqueue\n  RETURNING id\n)\nSELECT enqueue.id, enqueue.idempotency_key, enqueue.status, audit.id as audit_id FROM enqueue LEFT JOIN audit ON true;"
+        },
+        "id": "pg-enqueue",
+        "name": "Enqueue Followup Command",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          1840,
+          300
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "pgApiErp001",
+            "name": "Postgres api_erp"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Webhook Trigger": {
+        "main": [
+          [
+            {
+              "node": "Load Config",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Load Config": {
+        "main": [
+          [
+            {
+              "node": "Parse Config",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Config": {
+        "main": [
+          [
+            {
+              "node": "ERP Agenda Read",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "ERP Agenda Read": {
+        "main": [
+          [
+            {
+              "node": "Prepare Appointments",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Appointments": {
+        "main": [
+          [
+            {
+              "node": "Upsert Appointment",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upsert Appointment": {
+        "main": [
+          [
+            {
+              "node": "Build Followup Command",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Followup Command": {
+        "main": [
+          [
+            {
+              "node": "Enqueue Followup Command",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Enqueue Followup Command": {
+        "main": []
+      }
+    }
+  }
+]
